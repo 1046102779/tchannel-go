@@ -735,11 +735,14 @@ func (ch *Channel) getMinConnectionState() connectionState {
 // 当关闭一个connection时，就会触发从channel中移除连接，
 // 并且可能还要修改channel.mutable.state的状态值
 func (ch *Channel) connectionCloseStateChange(c *Connection) {
+	// 从channel.mutable.conns中移除connection
 	ch.removeClosedConn(c)
+	// ::TODO
 	if peer, ok := ch.RootPeers().Get(c.remotePeerInfo.HostPort); ok {
 		peer.connectionCloseStateChange(c)
 		ch.updatePeer(peer)
 	}
+	// ::TODO
 	if c.outboundHP != "" && c.outboundHP != c.remotePeerInfo.HostPort {
 		// Outbound connections may be in multiple peers.
 		if peer, ok := ch.RootPeers().Get(c.outboundHP); ok {
@@ -780,22 +783,24 @@ func (ch *Channel) connectionCloseStateChange(c *Connection) {
 	c.log.Debugf("ConnectionCloseStateChange channel state = %v connection minState = %v",
 		chState, minState)
 
+	// 如果channel的state状态为ChannelClosed关闭状态，则从全局channelMap中移除该channel
 	if updatedToState == ChannelClosed {
 		ch.onClosed()
 	}
 }
 
+// 从channelMap中移除该channel
 func (ch *Channel) onClosed() {
 	removeClosedChannel(ch)
 	ch.log.Infof("Channel closed.")
 }
 
-// Closed returns whether this channel has been closed with .Close()
+// 校验channel state是否为ChannelClosed
 func (ch *Channel) Closed() bool {
 	return ch.State() == ChannelClosed
 }
 
-// State returns the current channel state.
+// 获取channel的状态, 也就是所有连接的最小状态
 func (ch *Channel) State() ChannelState {
 	ch.mutable.RLock()
 	state := ch.mutable.state
@@ -808,6 +813,9 @@ func (ch *Channel) State() ChannelState {
 // 1. This call closes the Listener and starts closing connections.
 // 2. When all incoming connections are drained, the connection blocks new outgoing calls.
 // 3. When all connections are drained, the channel's state is updated to Closed.
+//
+// 1. channel主动关闭，首先会关闭服务端的监听listener，不会再Accept新请求
+// 2. idle sweep停止对所有连接进行超时检测, 该goroutine退出
 func (ch *Channel) Close() {
 	ch.Logger().Info("Channel.Close called.")
 	var connections []*Connection
@@ -822,6 +830,7 @@ func (ch *Channel) Close() {
 	// Stop the idle connections timer.
 	ch.mutable.idleSweep.Stop()
 
+	// 所有的连接开始关闭, 当所有连接关闭时，则执行从channelMap中移除channel操作
 	ch.mutable.state = ChannelStartClose
 	if len(ch.mutable.conns) == 0 {
 		ch.mutable.state = ChannelClosed
@@ -842,10 +851,12 @@ func (ch *Channel) Close() {
 }
 
 // RelayHost returns the channel's RelayHost, if any.
+// ::TODO
 func (ch *Channel) RelayHost() RelayHost {
 	return ch.relayHost
 }
 
+// 如果channel options参数的空闲连接检查间隔时间大于0， 但是空闲连接时间长度小于0， 则无法启动goroutine idle sweep, 则返回错误
 func (o *ChannelOptions) validateIdleCheck() error {
 	if o.IdleCheckInterval > 0 && o.MaxIdleTime <= 0 {
 		return errMaxIdleTimeNotSet
@@ -854,6 +865,7 @@ func (o *ChannelOptions) validateIdleCheck() error {
 	return nil
 }
 
+// 把slice改为字典hash
 func toStringSet(ss []string) map[string]struct{} {
 	set := make(map[string]struct{}, len(ss))
 	for _, s := range ss {

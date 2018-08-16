@@ -51,29 +51,26 @@ const (
 	defaultConnectionBufferSize = 512
 )
 
-// PeerVersion contains version related information for a specific peer.
-// These values are extracted from the init headers.
+// 版本协议: 语言，语言版本和tchannel版本
 type PeerVersion struct {
 	Language        string `json:"language"`
 	LanguageVersion string `json:"languageVersion"`
 	TChannelVersion string `json:"tchannelVersion"`
 }
 
-// PeerInfo contains information about a TChannel peer
+// rpc service或者rpc client的相关信息: host:port, 进程名称和版本协议
 type PeerInfo struct {
-	// The host and port that can be used to contact the peer, as encoded by net.JoinHostPort
 	HostPort string `json:"hostPort"`
 
-	// The logical process name for the peer, used for only for logging / debugging
 	ProcessName string `json:"processName"`
 
 	// IsEphemeral returns whether the remote host:port is ephemeral (e.g. not listening).
 	IsEphemeral bool `json:"isEphemeral"`
 
-	// Version returns the version information for the remote peer.
 	Version PeerVersion `json:"version"`
 }
 
+// 实现String interface，提供PeerInfo的输出
 func (p PeerInfo) String() string {
 	return fmt.Sprintf("%s(%s)", p.HostPort, p.ProcessName)
 }
@@ -83,11 +80,11 @@ func (p PeerInfo) IsEphemeralHostPort() bool {
 	return p.IsEphemeral
 }
 
-// LocalPeerInfo adds service name to the peer info, only required for the local peer.
+// 本地PeerInfo，channel存储的localPeerInfo
 type LocalPeerInfo struct {
 	PeerInfo
 
-	// ServiceName is the service name for the local peer.
+	// 服务名
 	ServiceName string `json:"serviceName"`
 }
 
@@ -121,28 +118,26 @@ func (e errConnectionUnknownState) Error() string {
 }
 
 // ConnectionOptions are options that control the behavior of a Connection
+// ConnectionOptions用于控制connection的行为
 type ConnectionOptions struct {
-	// The frame pool, allowing better management of frame buffers. Defaults to using raw heap.
+	// 发送消息最终都是封装在协议帧中，帧的大量使用使用临时对象池是非常好，tchannel提供了sync.Pool, tchannel队列和其他，默认使用raw heap
 	FramePool FramePool
-
-	// NOTE: This is deprecated and not used for anything.
-	RecvBufferSize int
 
 	// The size of send channel buffers. Defaults to 512.
 	SendBufferSize int
 
-	// The type of checksum to use when sending messages.
+	// checksum消息校验规则
 	ChecksumType ChecksumType
 
 	// ToS class name marked on outbound packets.
 	TosPriority tos.ToS
 
-	// HealthChecks configures active connection health checking for this channel.
-	// By default, health checks are not enabled.
+	// connection的健康检查，默认不开启
 	HealthChecks HealthCheckOptions
 }
 
-// connectionEvents are the events that can be triggered by a connection.
+// connectionEvents是由connection的状态发生变化时触发
+// 比如在channel中经常提到的newConnection方法，当一个流入或者流出的连接创建时，会触发OnActive操作，它会使得connection存储在channel.mutable.conns中
 type connectionEvents struct {
 	// OnActive is called when a connection becomes active.
 	OnActive func(c *Connection)
@@ -158,26 +153,29 @@ type connectionEvents struct {
 type Connection struct {
 	channelConnectionCommon
 
-	connID          uint32
-	opts            ConnectionOptions
-	conn            net.Conn
-	localPeerInfo   LocalPeerInfo
-	remotePeerInfo  PeerInfo
-	sendCh          chan *Frame
-	stopCh          chan struct{}
-	state           connectionState
-	stateMut        sync.RWMutex
-	inbound         *messageExchangeSet
-	outbound        *messageExchangeSet
+	connID         uint32            // conn id，自增长
+	opts           ConnectionOptions // 控制连接的行为
+	conn           net.Conn          // 真正的conn，上面有数据流动
+	localPeerInfo  LocalPeerInfo     // 连接发起方的相关服务信息
+	remotePeerInfo PeerInfo          // 连接另一端的相关信息
+	// 连接上发送协议帧到channel队列上，然后connection的goroutine接收数据并发送到net.conn上
+	sendCh   chan *Frame
+	stopCh   chan struct{}       //  停止发送数据到net.conn上
+	state    connectionState     // connection的状态
+	stateMut sync.RWMutex        // 状态读写互斥
+	inbound  *messageExchangeSet // ::TODO
+	outbound *messageExchangeSet // ::TODO
+	// 当每个连接接收到协议帧并获取业务逻辑数据后，
+	// 通过继承channel的handler通过反射，往上层放到业务逻辑处理业务
 	handler         Handler
-	nextMessageID   atomic.Uint32
-	events          connectionEvents
+	nextMessageID   atomic.Uint32    // connection下一个msg id自增长
+	events          connectionEvents // connection state变化时触发的事件
 	commonStatsTags map[string]string
-	relay           *Relayer
+	relay           *Relayer // ::TODO
 
-	// outboundHP is the host:port we used to create this outbound connection.
-	// It may not match remotePeerInfo.HostPort, in which case the connection is
-	// added to peers for both host:ports. For inbound connections, this is empty.
+	// 当这个连接为流入时，也就是服务注册的服务channel accept一个连接时，outboundHP为空；
+	// 当服务channel主动发起与某个host:port建立一个connection， 则outboundHP为服务channel的host:port
+	// outboundHP = outbound host port
 	outboundHP string
 
 	// closeNetworkCalled is used to avoid errors from being logged
@@ -197,11 +195,12 @@ type Connection struct {
 	healthCheckDone    chan struct{}
 	healthCheckHistory *healthHistory
 
-	// lastActivity is used to track how long the connection has been idle.
+	// 该connection上一次有数据流动的时间, goroutine idle sweep通过它检测连接的空闲超时
 	// (unix time, nano)
 	lastActivity atomic.Int64
 }
 
+// 该变量可以通过PeerInfo获取解析
 type peerAddressComponents struct {
 	port     uint16
 	ipv4     uint32
@@ -209,7 +208,7 @@ type peerAddressComponents struct {
 	hostname string
 }
 
-// _nextConnID is used to allocate unique IDs to every connection for debugging purposes.
+// 全局conn id
 var _nextConnID atomic.Uint32
 
 type connectionState int
@@ -232,6 +231,7 @@ const (
 
 //go:generate stringer -type=connectionState
 
+// 获取context的载体剩余生存时间
 func getTimeout(ctx context.Context) time.Duration {
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -241,6 +241,7 @@ func getTimeout(ctx context.Context) time.Duration {
 	return deadline.Sub(time.Now())
 }
 
+// connection的默认控制行为，checksum：crc32， raw pool， 512， 默认的健康检查
 func (co ConnectionOptions) withDefaults() ConnectionOptions {
 	if co.ChecksumType == ChecksumTypeNone {
 		co.ChecksumType = ChecksumTypeCrc32
@@ -255,6 +256,7 @@ func (co ConnectionOptions) withDefaults() ConnectionOptions {
 	return co
 }
 
+// ::TODO, 比较底层
 func (ch *Channel) setConnectionTosPriority(tosPriority tos.ToS, c net.Conn) error {
 	tcpAddr, isTCP := c.RemoteAddr().(*net.TCPAddr)
 	if !isTCP {
@@ -356,7 +358,9 @@ func (ch *Channel) newConnection(conn net.Conn, initialID uint32, outboundHP str
 	}
 
 	// 该初始化的active connection, 并起一个goroutine进行健康检查
-	// ::TODO 我觉得goroutine太多了，是不是一个通过channel队列方式进行沟通协作
+	// 同时触发channel.mutable.conns存储conn
+	//
+	// 我觉得goroutine太多了，是不是一个通过channel队列方式进行沟通协作?
 	c.callOnActive()
 
 	// 起一个goroutine， 从connection读取协议帧消息
@@ -366,15 +370,17 @@ func (ch *Channel) newConnection(conn net.Conn, initialID uint32, outboundHP str
 	return c
 }
 
+// ::TODO
 func (c *Connection) onExchangeAdded() {
 	c.callOnExchangeChange()
 }
 
-// IsActive returns whether this connection is in an active state.
+// 获取connection的当前状态是否健康
 func (c *Connection) IsActive() bool {
 	return c.readState() == connectionActive
 }
 
+// 当新建的连接为active状态时，会触发健康检查和conn的存储
 func (c *Connection) callOnActive() {
 	log := c.log
 	if remoteVersion := c.remotePeerInfo.Version; remoteVersion != (PeerVersion{}) {
@@ -386,10 +392,12 @@ func (c *Connection) callOnActive() {
 	}
 	log.Info("Created new active connection.")
 
+	// 在channel.mutable.conns存储connection
 	if f := c.events.OnActive; f != nil {
 		f(c)
 	}
 
+	// 健康检查
 	if c.opts.HealthChecks.enabled() {
 		c.healthCheckCtx, c.healthCheckQuit = context.WithCancel(context.Background())
 		c.healthCheckDone = make(chan struct{})
@@ -397,19 +405,21 @@ func (c *Connection) callOnActive() {
 	}
 }
 
+// 因connection state为关闭状态，触发events的关闭事件
 func (c *Connection) callOnCloseStateChange() {
 	if f := c.events.OnCloseStateChange; f != nil {
 		f(c)
 	}
 }
 
+// ::TODO
 func (c *Connection) callOnExchangeChange() {
 	if f := c.events.OnExchangeUpdated; f != nil {
 		f(c)
 	}
 }
 
-// ping sends a ping message and waits for a ping response.
+// 当connection的健康检查开启时，会定时的进行协议帧类型为call ping空包检查连接的连通性
 func (c *Connection) ping(ctx context.Context) error {
 	if !c.pendingExchangeMethodAdd() {
 		// Connection is closed, no need to do anything.
@@ -417,6 +427,7 @@ func (c *Connection) ping(ctx context.Context) error {
 	}
 	defer c.pendingExchangeMethodDone()
 
+	// 拼装ping的协议帧包 ::TODO
 	req := &pingReq{id: c.NextMessageID()}
 	mex, err := c.outbound.newExchange(ctx, c.opts.FramePool, req.messageType(), req.ID(), 1)
 	if err != nil {
@@ -424,15 +435,29 @@ func (c *Connection) ping(ctx context.Context) error {
 	}
 	defer c.outbound.removeExchange(req.ID())
 
+	// 发送帧包到connection发送的goroutine中，通过channel队列实现
+	// connection有两个goroutine，一个为发送，一个为接收
 	if err := c.sendMessage(req); err != nil {
 		return c.connectionError("send ping", err)
 	}
 
+	// ::TODO
 	return c.recvMessage(ctx, &pingRes{}, mex)
 }
 
-// handlePingRes calls registered ping handlers.
+// connection针对inbound数据，也即服务注册的服务channel accept连接后，后面针对该connection流入的数据协议帧解析
+// 下面的type占1字节, 类型包括：init req, init res, call req, call res, call req continue, call res continue, cancel, claim, ping req, ping res, error
+/*
+Position	Contents
+0-7			size:2 type:1 reserved:1 id:4
+8-15		reserved:8
+16+			payload - based on type
+*/
+
+// handlePingRes，是针对ping res包解析数据
+// connection接收对方发过来的ping响应包
 func (c *Connection) handlePingRes(frame *Frame) bool {
+	// ::TODO
 	if err := c.outbound.forwardPeerFrame(frame); err != nil {
 		c.log.WithFields(LogField{"response", frame.Header}).Warn("Unexpected ping response.")
 		return true
@@ -441,7 +466,7 @@ func (c *Connection) handlePingRes(frame *Frame) bool {
 	return false
 }
 
-// handlePingReq responds to the pingReq message with a pingRes.
+// handlePingReq, 针对对connection的另一方发出ping req包, 进行解析
 func (c *Connection) handlePingReq(frame *Frame) {
 	if !c.pendingExchangeMethodAdd() {
 		// Connection is closed, no need to do anything.
@@ -454,20 +479,23 @@ func (c *Connection) handlePingReq(frame *Frame) {
 		return
 	}
 
+	// ping req包拿到后，直接发出ping res包, 发送到connection的goroutine发送数据中，通过channel
 	pingRes := &pingRes{id: frame.Header.ID}
 	if err := c.sendMessage(pingRes); err != nil {
 		c.connectionError("send pong", err)
 	}
 }
 
-// sendMessage sends a standalone message (typically a control message)
+// sendMessage, 发送消息到channel队列上，connection的一个goroutine监听队列数据, 并发送到net.Conn上
 func (c *Connection) sendMessage(msg message) error {
+	// message封装成帧
 	frame := c.opts.FramePool.Get()
 	if err := frame.write(msg); err != nil {
 		c.opts.FramePool.Release(frame)
 		return err
 	}
 
+	// 发送到channel队列上
 	select {
 	case c.sendCh <- frame:
 		return nil
@@ -476,8 +504,7 @@ func (c *Connection) sendMessage(msg message) error {
 	}
 }
 
-// recvMessage blocks waiting for a standalone response message (typically a
-// control message)
+// recvMessage阻塞读，等待frame的到来, 用于connection的ping包响应读取
 func (c *Connection) recvMessage(ctx context.Context, msg message, mex *messageExchange) error {
 	frame, err := mex.recvPeerFrameOfType(msg.messageType())
 	if err != nil {
@@ -492,17 +519,17 @@ func (c *Connection) recvMessage(ctx context.Context, msg message, mex *messageE
 	return err
 }
 
-// RemotePeerInfo returns the peer info for the remote peer.
+// 获取connection另一端的peerInfo信息
 func (c *Connection) RemotePeerInfo() PeerInfo {
 	return c.remotePeerInfo
 }
 
-// NextMessageID reserves the next available message id for this connection
+// connection上的msg id自增长
 func (c *Connection) NextMessageID() uint32 {
 	return c.nextMessageID.Inc()
 }
 
-// SendSystemError sends an error frame for the given system error.
+// SendSystemError 发送一个系统错误帧
 func (c *Connection) SendSystemError(id uint32, span Span, err error) error {
 	frame := c.opts.FramePool.Get()
 
@@ -609,7 +636,7 @@ func (c *Connection) protocolError(id uint32, err error) error {
 	return sysErr
 }
 
-// withStateLock performs an action with the connection state mutex locked
+// withStateLock的作用：是的外部的闭包函数值的执行是在互斥期间
 func (c *Connection) withStateLock(f func() error) error {
 	c.stateMut.Lock()
 	err := f()
@@ -618,7 +645,7 @@ func (c *Connection) withStateLock(f func() error) error {
 	return err
 }
 
-// withStateRLock performs an action with the connection state mutex rlocked.
+// withStateRLock与上面类似，只是锁的粒度变大了
 func (c *Connection) withStateRLock(f func() error) error {
 	c.stateMut.RLock()
 	err := f()
@@ -627,6 +654,7 @@ func (c *Connection) withStateRLock(f func() error) error {
 	return err
 }
 
+// 获取连接的当前状态
 func (c *Connection) readState() connectionState {
 	c.stateMut.RLock()
 	state := c.state
@@ -634,11 +662,8 @@ func (c *Connection) readState() connectionState {
 	return state
 }
 
-// readFrames is the loop that reads frames from the network connection and
-// dispatches to the appropriate handler. Run within its own goroutine to
-// prevent overlapping reads on the socket.  Most handlers simply send the
-// incoming frame to a channel; the init handlers are a notable exception,
-// since we cannot process new frames until the initialization is complete.
+// connection的一个goroutine用于接收流入的协议帧,
+// 并通过connection的handleFrameNoRelay进行具体协议类型分发处理
 func (c *Connection) readFrames(_ uint32) {
 	headerBuf := make([]byte, FrameHeaderSize)
 
@@ -651,13 +676,14 @@ func (c *Connection) readFrames(_ uint32) {
 	}
 
 	for {
-		// Read the header, avoid allocating the frame till we know the size
-		// we need to allocate.
+		// 阻塞读取数据流， 因为peer-to-peer， 所以不存在并发问题
+		// 读取到帧协议到头部后，在根据frame header首2字节获取大小，再减去16字节头部，则可以截取到frame一个完整的帧
 		if _, err := io.ReadFull(c.conn, headerBuf); err != nil {
 			handleErr(err)
 			return
 		}
 
+		// 通过frame相关行为，读取payload数据，并把整帧数据存储到frame中
 		frame := c.opts.FramePool.Get()
 		if err := frame.ReadBody(headerBuf, c.conn); err != nil {
 			handleErr(err)
@@ -665,8 +691,10 @@ func (c *Connection) readFrames(_ uint32) {
 			return
 		}
 
+		// 更新这个connection的最新active时间
 		c.updateLastActivity(frame)
 
+		// 协议帧分发到相关帧类型connection处理，比如：handlePingReq、handlePingRes等
 		var releaseFrame bool
 		if c.relay == nil {
 			releaseFrame = c.handleFrameNoRelay(frame)
@@ -676,9 +704,11 @@ func (c *Connection) readFrames(_ uint32) {
 		if releaseFrame {
 			c.opts.FramePool.Release(frame)
 		}
+		// 最后用完frame后，记得释放临时对象池
 	}
 }
 
+// relay ::TODO
 func (c *Connection) handleFrameRelay(frame *Frame) bool {
 	switch frame.Header.messageType {
 	case messageTypeCallReq, messageTypeCallReqContinue, messageTypeCallRes, messageTypeCallResContinue, messageTypeError:
@@ -695,10 +725,13 @@ func (c *Connection) handleFrameRelay(frame *Frame) bool {
 	}
 }
 
+// connection的一个接收另一端发送过来的数据，
+// 通过readFrames读取，并通过该方法进行协议类型分发处理
 func (c *Connection) handleFrameNoRelay(frame *Frame) bool {
 	releaseFrame := true
 
-	// call req and call res messages may not want the frame released immediately.
+	// 一共7种类型帧, 分发到具体的协议处理
+	// 另外的init req, init res, cancel, claim四种协议类型，目前没看到实现
 	switch frame.Header.messageType {
 	case messageTypeCallReq:
 		releaseFrame = c.handleCallReq(frame)
@@ -725,8 +758,8 @@ func (c *Connection) handleFrameNoRelay(frame *Frame) bool {
 	return releaseFrame
 }
 
-// writeFrames is the main loop that pulls frames from the send channel and
-// writes them to the connection.
+// writeFrames是connection用于发送协议帧到net.Conn的goroutine
+// 它通过channel队列获取frame，connection.writeMessage
 func (c *Connection) writeFrames(_ uint32) {
 	for {
 		select {
@@ -736,7 +769,9 @@ func (c *Connection) writeFrames(_ uint32) {
 			}
 
 			c.updateLastActivity(f)
+			// 直接写入到net.Conn
 			err := f.WriteOut(c.conn)
+			// 释放协议帧到临时对象池中
 			c.opts.FramePool.Release(f)
 			if err != nil {
 				c.connectionError("write frames", err)
@@ -747,15 +782,16 @@ func (c *Connection) writeFrames(_ uint32) {
 			if len(c.sendCh) > 0 {
 				continue
 			}
-			// Close the network once we're no longer writing frames.
+			// 关闭connection的net.Conn不再接收外界的数据帧
 			c.closeNetwork()
 			return
 		}
 	}
 }
 
-// updateLastActivity marks when the last message was received/sent on the channel.
-// This is used for monitoring idle connections and timing them out.
+// updateLastActivity更新connection的最后活跃时间
+// 注意：校验connection是否活跃，只关注协议帧类型为：call req, call req continue, call res, call res continue和error
+// ping用于connection的健康检查, 不是活跃数据
 func (c *Connection) updateLastActivity(frame *Frame) {
 	// Pings are ignored for last activity.
 	switch frame.Header.messageType {
@@ -764,26 +800,19 @@ func (c *Connection) updateLastActivity(frame *Frame) {
 	}
 }
 
-// pendingExchangeMethodAdd returns whether the method that is trying to
-// add a message exchange can continue.
+// ::TODO
 func (c *Connection) pendingExchangeMethodAdd() bool {
 	return c.pendingMethods.Inc() > 0
 }
 
-// pendingExchangeMethodDone should be deferred by a method called
-// pendingExchangeMessageAdd.
+// ::TODO
 func (c *Connection) pendingExchangeMethodDone() {
 	c.pendingMethods.Dec()
 }
 
-// closeSendCh waits till there are no other goroutines that may try to write
-// to sendCh.
-// We accept connID on the stack so can more easily debug panics or leaked goroutines.
+// 关闭connection, 这里的conn id无需使用, 因为本连接不能关闭其他连接吧
 func (c *Connection) closeSendCh(connID uint32) {
-	// Wait till all methods that may add exchanges are done running.
-	// When they are done, we set the value to a negative value which
-	// will ensure that if any other methods start that may add exchanges
-	// they will fail due to closed connection.
+	// ::TODO
 	for !c.pendingMethods.CAS(0, math.MinInt32) {
 		time.Sleep(time.Millisecond)
 	}
@@ -791,7 +820,7 @@ func (c *Connection) closeSendCh(connID uint32) {
 	close(c.stopCh)
 }
 
-// checkExchanges is called whenever an exchange is removed, and when Close is called.
+// ::TODO
 func (c *Connection) checkExchanges() {
 	c.callOnExchangeChange()
 
@@ -846,6 +875,7 @@ func (c *Connection) checkExchanges() {
 	}
 }
 
+// 连接关闭, 并调用events中的OnCloseStateChange，执行channel的state变化，和channel.mutable.conns移除
 func (c *Connection) close(fields ...LogField) error {
 	c.log.WithFields(fields...).Info("Connection closing.")
 
@@ -867,25 +897,19 @@ func (c *Connection) close(fields ...LogField) error {
 	).Debug("Connection state updated in Close.")
 	c.callOnCloseStateChange()
 
-	// Check all in-flight requests to see whether we can transition the Close state.
+	// ::TODO
 	c.checkExchanges()
 
 	return nil
 }
 
-// Close starts a graceful Close which will first reject incoming calls, reject outgoing calls
-// before finally marking the connection state as closed.
+// 关闭connection
 func (c *Connection) Close() error {
 	return c.close(LogField{"reason", "user initiated"})
 }
 
-// closeNetwork closes the network connection and all network-related channels.
-// This should only be done in response to a fatal connection or protocol
-// error, or after all pending frames have been sent.
+// 关闭connection中的net.Conn连接, 并停止做connection的健康检查
 func (c *Connection) closeNetwork() {
-	// NB(mmihic): The sender goroutine will exit once the connection is
-	// closed; no need to close the send channel (and closing the send
-	// channel would be dangerous since other goroutine might be sending)
 	c.log.Debugf("Closing underlying network connection")
 	c.stopHealthCheck()
 	c.closeNetworkCalled.Inc()
@@ -897,9 +921,7 @@ func (c *Connection) closeNetwork() {
 	}
 }
 
-// getLastActivityTime returns the timestamp of the last frame read or written,
-// excluding pings. If no frames were transmitted yet, it will return the time
-// this connection was created.
+// 获取connection的最后活跃时间
 func (c *Connection) getLastActivityTime() time.Time {
 	return time.Unix(0, c.lastActivity.Load())
 }
