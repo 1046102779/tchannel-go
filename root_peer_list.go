@@ -22,8 +22,14 @@ package tchannel
 
 import "sync"
 
-// RootPeerList is the root peer list which is only used to connect to
-// peers and share peers between subchannels.
+// 注意通过Peer，才能获得到具体的connection，并进行read/write,
+// 注意：所有的peer在direction都存放着两个connection, 并在channel.mutable.conns存储着所有连接
+
+// RootPeerList用于维护本channel与所有remote peer建立连接的相关peer信息
+// 如果本channel与其他host:port建立起的connection，则会从找到remote peer拥有的connection，
+// 并进行read/write
+//
+// 其中，Connectable用于发起一个新的连接
 type RootPeerList struct {
 	sync.RWMutex
 
@@ -32,6 +38,9 @@ type RootPeerList struct {
 	peersByHostPort     map[string]*Peer
 }
 
+// 服务注册的服务channel，创建RootPeerList实例
+//
+// ch Connectable为channel实例，该channel实现了Connectable interface
 func newRootPeerList(ch Connectable, onPeerStatusChanged func(*Peer)) *RootPeerList {
 	return &RootPeerList{
 		channel:             ch,
@@ -40,23 +49,20 @@ func newRootPeerList(ch Connectable, onPeerStatusChanged func(*Peer)) *RootPeerL
 	}
 }
 
-// newChild returns a new isolated peer list that shares the underlying peers
-// with the root peer list.
+// newChild创建一个子PeerList，为channel的RootPeerList的child
+// ::TODO
 func (l *RootPeerList) newChild() *PeerList {
 	return newPeerList(l)
 }
 
-// Add adds a peer to the root peer list if it does not exist, or return
-// an existing peer if it exists.
+// 服务注册的服务channel, 保存
+//
+// 注意两点：
+//  1. 如果服务注册的服务channel发起调用，则remote service的host:port保存到RootPeerList的peersByHostPort
+//  2. 如果是remote service发起与本channel的connection调用，则把remote service的host:port保存到...
+//  3. 如果peersByHostPort中host:port已存在，则返回Peer，并指明这个Peer中的connection direction
 func (l *RootPeerList) Add(hostPort string) *Peer {
-	l.RLock()
-
-	if p, ok := l.peersByHostPort[hostPort]; ok {
-		l.RUnlock()
-		return p
-	}
-
-	l.RUnlock()
+	// 再次读取peersByHostPort，如果不存在，则写入
 	l.Lock()
 	defer l.Unlock()
 
@@ -72,17 +78,16 @@ func (l *RootPeerList) Add(hostPort string) *Peer {
 	return p
 }
 
-// GetOrAdd returns a peer for the given hostPort, creating one if it doesn't yet exist.
+// 校验host:port在channel中的peersByHostPort是否存在
 func (l *RootPeerList) GetOrAdd(hostPort string) *Peer {
-	peer, ok := l.Get(hostPort)
-	if ok {
+	if peer, ok := l.Get(hostPort); ok {
 		return peer
 	}
 
 	return l.Add(hostPort)
 }
 
-// Get returns a peer for the given hostPort if it exists.
+// 从channel中通过peersByHostPort，获取key为host:port的Peer
 func (l *RootPeerList) Get(hostPort string) (*Peer, bool) {
 	l.RLock()
 	p, ok := l.peersByHostPort[hostPort]
@@ -90,15 +95,18 @@ func (l *RootPeerList) Get(hostPort string) (*Peer, bool) {
 	return p, ok
 }
 
+// 当关闭connection时，会从channel的RootPeerList去掉peer
+//
+// 注意：host:port对应的Peer，有inbound和outbound的两个方向, 当peer-to-peer的connections全部为空时，则可清除
 func (l *RootPeerList) onClosedConnRemoved(peer *Peer) {
+	// 获取host:port对应的peer，并校验是否在peersByHostPort存在
 	hostPort := peer.HostPort()
 	p, ok := l.Get(hostPort)
 	if !ok {
-		// It's possible that multiple connections were closed and removed at the same time,
-		// so multiple goroutines might be removing the peer from the root peer list.
 		return
 	}
 
+	// 评估peer是否可以在channel中删除
 	if p.canRemove() {
 		l.Lock()
 		delete(l.peersByHostPort, hostPort)
@@ -109,7 +117,7 @@ func (l *RootPeerList) onClosedConnRemoved(peer *Peer) {
 	}
 }
 
-// Copy returns a map of the peer list. This method should only be used for testing.
+// 快照克隆一份peersByHostPort
 func (l *RootPeerList) Copy() map[string]*Peer {
 	l.RLock()
 	defer l.RUnlock()
