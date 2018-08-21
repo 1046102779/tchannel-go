@@ -1,4 +1,4 @@
-// Copyright (c) 2015 Uber Technologies, Inc.
+// Copyright (c) 2015 1046102779 Technologies, Inc.
 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -23,7 +23,7 @@ package tchannel
 import (
 	"fmt"
 
-	"github.com/uber/tchannel-go/typed"
+	"github.com/1046102779/tchannel-go/typed"
 )
 
 type errReqResWriterStateMismatch struct {

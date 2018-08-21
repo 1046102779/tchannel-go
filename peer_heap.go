@@ -1,4 +1,4 @@
-// Copyright (c) 2015 Uber Technologies, Inc.
+// Copyright (c) 2015 1046102779 Technologies, Inc.
 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -24,7 +24,7 @@ import (
 	"container/heap"
 	"math/rand"
 
-	"github.com/uber/tchannel-go/trand"
+	"github.com/1046102779/tchannel-go/trand"
 )
 
 // peerHeap maintains a min-heap of peers based on the peers' score. All method

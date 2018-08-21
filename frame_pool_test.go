@@ -1,4 +1,4 @@
-// Copyright (c) 2015 Uber Technologies, Inc.
+// Copyright (c) 2015 1046102779 Technologies, Inc.
 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -31,12 +31,12 @@ import (
 	"testing"
 	"time"
 
-	. "github.com/uber/tchannel-go"
+	. "github.com/1046102779/tchannel-go"
 
-	"github.com/uber/tchannel-go/raw"
-	"github.com/uber/tchannel-go/testutils"
-	"github.com/uber/tchannel-go/testutils/goroutines"
-	"github.com/uber/tchannel-go/testutils/testreader"
+	"github.com/1046102779/tchannel-go/raw"
+	"github.com/1046102779/tchannel-go/testutils"
+	"github.com/1046102779/tchannel-go/testutils/goroutines"
+	"github.com/1046102779/tchannel-go/testutils/testreader"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
