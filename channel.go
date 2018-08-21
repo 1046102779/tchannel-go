@@ -413,11 +413,10 @@ func (ch *Channel) createCommonStats() {
 		return
 	}
 	ch.mutable.commonStatsTags["host"] = host
-	// TODO(prashant): Allow user to pass extra tags (such as cluster, version).
 }
 
 // 一个通过NewChannel方法进行服务注册的channel，可以拥有map[string]*SubChannel, 这个后面再看
-//::TODO
+// ::TODO
 // 通过服务名获取subchannel, 如果是新建subchannel，则需要为subchannel实例设置一些参数
 func (ch *Channel) GetSubChannel(serviceName string, opts ...SubChannelOption) *SubChannel {
 	sub, added := ch.subChannels.getOrAdd(serviceName, ch)
@@ -429,12 +428,12 @@ func (ch *Channel) GetSubChannel(serviceName string, opts ...SubChannelOption) *
 	return sub
 }
 
-// ::TODO
+// 返回该channel与其他建立connection的所有Peers
 func (ch *Channel) Peers() *PeerList {
 	return ch.peers
 }
 
-// ::TODO
+// 所有的Peers都在channel的RootPeerList中存在，返回root的PeerList
 func (ch *Channel) RootPeers() *RootPeerList {
 	return ch.peers.parent
 }
@@ -442,7 +441,7 @@ func (ch *Channel) RootPeers() *RootPeerList {
 // 当rpc client进行服务调用时，第一步需要在协议帧的非业务数据上写入服务名、方法名和其他参数设置, 例如：协议帧的headers各个参数
 //
 // 协议帧的body部分通过, 通过上层具体的the arg scheme format：json，thrift，http，来进行参数封装写入，以及阻塞读取rpc service handler的response返回
-// 对于peer相关 ::TODO
+// 对于peer相关 封装一个对外调用的OutboundCall，这包含了frame的消息帧arg1
 func (ch *Channel) BeginCall(ctx context.Context, hostPort, serviceName, methodName string, callOptions *CallOptions) (*OutboundCall, error) {
 	p := ch.RootPeers().GetOrAdd(hostPort)
 	return p.BeginCall(ctx, serviceName, methodName, callOptions)
@@ -631,7 +630,7 @@ func (ch *Channel) exchangeUpdated(c *Connection) {
 	ch.updatePeer(p)
 }
 
-// ::TODO
+// updatePeer方法更新Peer，包括PeerScore相关
 func (ch *Channel) updatePeer(p *Peer) {
 	ch.peers.onPeerChange(p)
 	ch.subChannels.updatePeer(p)
@@ -673,11 +672,11 @@ func (ch *Channel) connectionActive(c *Connection, direction connectionDirection
 		return
 	}
 
-	// ::TODO
+	// 增加一个新的connection到相应的Peer中direction数组中
 	ch.addConnectionToPeer(c.remotePeerInfo.HostPort, c, direction)
 }
 
-// ::TODO
+// 增加服务channel与Peers的connections中
 func (ch *Channel) addConnectionToPeer(hostPort string, c *Connection, direction connectionDirection) {
 	p := ch.RootPeers().GetOrAdd(hostPort)
 	if err := p.addConnection(c, direction); err != nil {
@@ -737,12 +736,11 @@ func (ch *Channel) getMinConnectionState() connectionState {
 func (ch *Channel) connectionCloseStateChange(c *Connection) {
 	// 从channel.mutable.conns中移除connection
 	ch.removeClosedConn(c)
-	// ::TODO
+	// 获取channel与host:port建立的remote service peer, 关闭操作
 	if peer, ok := ch.RootPeers().Get(c.remotePeerInfo.HostPort); ok {
 		peer.connectionCloseStateChange(c)
 		ch.updatePeer(peer)
 	}
-	// ::TODO
 	if c.outboundHP != "" && c.outboundHP != c.remotePeerInfo.HostPort {
 		// Outbound connections may be in multiple peers.
 		if peer, ok := ch.RootPeers().Get(c.outboundHP); ok {

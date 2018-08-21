@@ -100,8 +100,8 @@ func (e *errNotifier) checkErr() error {
 	}
 }
 
-// messageExchange用于跟踪connection的信息交换
-// 每个message exchange都有一个channel，它用于从Peer上接收frames
+// messageExchange
+// 每当connection上新建一个msg id时，那么则Peer-To-Peer之间发起了一个rpc调用，这个rpc调用完成前，双方都需要等待对方的response, 则这个阻塞等待消息的到来。这里就用到了message exchange，它使用select channel阻塞获取frame
 type messageExchange struct {
 	recvCh    chan *Frame
 	errCh     errNotifier
@@ -125,7 +125,18 @@ func (mex *messageExchange) checkError() error {
 	return mex.errCh.checkErr()
 }
 
-// forwardPeerFrame传递一个frame从一个peer到这个message exchange
+// forwardPeerFrame方法调用的地方：
+// 1. func (c *Connection) handlePingRes(frame *Frame) bool
+// 2. func (c *Connection) handleCallReqContinue(frame *Frame) bool
+// 3. func (c *Connection) handleCallRes(frame *Frame) bool
+// 4. func (c *Connection) handleCallResContinue(frame *Frame) bool
+// 5. func (c *Connection) handleError(frame *Frame) bool
+//
+// 我们可以看到接收的消息帧类型:
+// ping res, call req continue, call res, call res continue和error
+// 通过这个我们可以看到在接收到这些消息帧时，msg id已经存在，所以connection的一方peer阻塞获取frame
+//
+// 例如：当Peer-To-Peer的connection一方发起rpc调用时，则阻塞直到对方Peer返回响应帧时，业务逻辑才会网下走，这个阻塞就是通过message exchange的select channel实现
 func (mex *messageExchange) forwardPeerFrame(frame *Frame) error {
 	// We want a very specific priority here:
 	// 1. Timeouts/cancellation (mex.ctx errors)
@@ -138,6 +149,7 @@ func (mex *messageExchange) forwardPeerFrame(frame *Frame) error {
 	}
 
 	select {
+	// 把connection上接收到的frame，返回业务处理结果给正在阻塞的rpc调用端
 	case mex.recvCh <- frame:
 		return nil
 	case <-mex.ctx.Done():
@@ -156,6 +168,7 @@ func (mex *messageExchange) forwardPeerFrame(frame *Frame) error {
 	}
 }
 
+// 校验connection上的msg id，在已建立的exchange message中的msg id是否相同，如果不相同，则错误
 func (mex *messageExchange) checkFrame(frame *Frame) error {
 	if frame.Header.ID != mex.msgID {
 		mex.mexset.log.WithFields(
@@ -167,8 +180,7 @@ func (mex *messageExchange) checkFrame(frame *Frame) error {
 	return nil
 }
 
-// recvPeerFrame waits for a new frame from the peer, or until the context
-// expires or is cancelled
+// 存储messageExchange的Peer，阻塞等待接收msg id剩余的消息帧, 直到msg id流程处理完毕
 func (mex *messageExchange) recvPeerFrame() (*Frame, error) {
 	// We have to check frames/errors in a very specific order here:
 	// 1. Timeouts/cancellation (mex.ctx errors)
@@ -181,6 +193,8 @@ func (mex *messageExchange) recvPeerFrame() (*Frame, error) {
 	}
 
 	select {
+	// 阻塞等待connection的另一端Peer发送消息帧过来,
+	// 因为前面说到的ping res，call res...，会直接使用forwardPeerFrame, 把frame写入到channel队列上
 	case frame := <-mex.recvCh:
 		if err := mex.checkFrame(frame); err != nil {
 			return nil, err
@@ -203,9 +217,7 @@ func (mex *messageExchange) recvPeerFrame() (*Frame, error) {
 	}
 }
 
-// recvPeerFrameOfType waits for a new frame of a given type from the peer, failing
-// if the next frame received is not of that type.
-// If an error frame is returned, then the errorMessage is returned as the error.
+//  阻塞获取消息帧，其实是调用上面的message exchange的recvPeerFrame方法
 func (mex *messageExchange) recvPeerFrameOfType(msgType messageType) (*Frame, error) {
 	frame, err := mex.recvPeerFrame()
 	if err != nil {
@@ -241,40 +253,29 @@ func (mex *messageExchange) recvPeerFrameOfType(msgType messageType) (*Frame, er
 	}
 }
 
-// shutdown shuts down the message exchange, removing it from the message
-// exchange set so  that it cannot receive more messages from the peer.  The
-// receive channel remains open, however, in case there are concurrent
-// goroutines sending to it.
+// 当一个connection的msg id调用流程完毕时，则移除exchange message
 func (mex *messageExchange) shutdown() {
-	// The reader and writer side can both hit errors and try to shutdown the mex,
-	// so we ensure that it's only shut down once.
+	// 校验message exchange的shutdown是否已关闭
 	if !mex.shutdownAtomic.CAS(0, 1) {
 		return
 	}
 
+	// 通知message exchange已关闭
 	if mex.errChNotified.CAS(0, 1) {
 		mex.errCh.Notify(errMexShutdown)
 	}
 
+	// 从message exchange set中移除msg id的message exchange
 	mex.mexset.removeExchange(mex.msgID)
 }
 
-// inboundExpired is called when an exchange is canceled or it times out,
-// but a handler may still be running in the background. Since the handler may
-// still write to the exchange, we cannot shutdown the exchange, but we should
-// remove it from the connection's exchange list.
+// context超时,移除message exchange
 func (mex *messageExchange) inboundExpired() {
 	mex.mexset.expireExchange(mex.msgID)
 }
 
-// A messageExchangeSet manages a set of active message exchanges.  It is
-// mainly used to route frames from a peer to the appropriate messageExchange,
-// or to cancel or mark a messageExchange as being in error.  Each Connection
-// maintains two messageExchangeSets, one to manage exchanges that it has
-// initiated (outbound), and another to manage exchanges that the peer has
-// initiated (inbound).  The message-type specific handlers are responsible for
-// ensuring that their message exchanges are properly registered and removed
-// from the corresponding exchange set.
+// message exchange set用于存储connection已经存在的所有msg id，并Peer阻塞接收的消息帧
+// 每个connection有两个message exchange set，一个inbound，一个outbound
 type messageExchangeSet struct {
 	sync.RWMutex
 
@@ -290,7 +291,8 @@ type messageExchangeSet struct {
 	shutdown         bool
 }
 
-// newMessageExchangeSet creates a new messageExchangeSet with a given name.
+// newMessageExchangeSet创建一个message exchange set实例
+// 参数name，有两个值：inbound和outbound
 func newMessageExchangeSet(log Logger, name string) *messageExchangeSet {
 	return &messageExchangeSet{
 		name:             name,
@@ -300,28 +302,33 @@ func newMessageExchangeSet(log Logger, name string) *messageExchangeSet {
 	}
 }
 
-// addExchange adds an exchange, it must be called with the mexset locked.
+// addExchange方法，添加一个新的message exchange到message exchange set中
 func (mexset *messageExchangeSet) addExchange(mex *messageExchange) error {
+	// 校验connection的direction是否已经关闭
 	if mexset.shutdown {
 		return errMexSetShutdown
 	}
 
+	// 校验message exchange是否已经存在
 	if _, ok := mexset.exchanges[mex.msgID]; ok {
 		return errDuplicateMex
 	}
 
+	// 存储message exchange到message exchange set中
 	mexset.exchanges[mex.msgID] = mex
+	// 增加一个goroutine阻塞 waitgroup
 	mexset.sendChRefs.Add(1)
 	return nil
 }
 
-// newExchange creates and adds a new message exchange to this set
+// newExchange方法新建一个message exchange，并添加到message exchange set中
 func (mexset *messageExchangeSet) newExchange(ctx context.Context, framePool FramePool,
 	msgType messageType, msgID uint32, bufferSize int) (*messageExchange, error) {
 	if mexset.log.Enabled(LogLevelDebug) {
 		mexset.log.Debugf("Creating new %s message exchange for [%v:%d]", mexset.name, msgType, msgID)
 	}
 
+	// 新建一个message exchange实例
 	mex := &messageExchange{
 		msgType:   msgType,
 		msgID:     msgID,
@@ -332,6 +339,7 @@ func (mexset *messageExchangeSet) newExchange(ctx context.Context, framePool Fra
 		framePool: framePool,
 	}
 
+	// 把message exchange添加到message exchange set中
 	mexset.Lock()
 	addErr := mexset.addExchange(mex)
 	mexset.Unlock()
@@ -357,14 +365,17 @@ func (mexset *messageExchangeSet) newExchange(ctx context.Context, framePool Fra
 	return mex, nil
 }
 
-// deleteExchange will delete msgID, and return whether it was found or whether it was
-// timed out. This method must be called with the lock.
+// deleteExchange移除msg id映射的message exchange
+// 这里互斥，写在外面了
 func (mexset *messageExchangeSet) deleteExchange(msgID uint32) (found, timedOut bool) {
+	// 在message exchange set中存在msg id的message exchange
+	// 如果存在，则删除message exchange
 	if _, found := mexset.exchanges[msgID]; found {
 		delete(mexset.exchanges, msgID)
 		return true, false
 	}
 
+	// 校验msg id是否已经存在，存在则移除
 	if _, expired := mexset.expiredExchanges[msgID]; expired {
 		delete(mexset.expiredExchanges, msgID)
 		return false, true
@@ -373,9 +384,8 @@ func (mexset *messageExchangeSet) deleteExchange(msgID uint32) (found, timedOut 
 	return false, false
 }
 
-// removeExchange removes a message exchange from the set, if it exists.
-// It decrements the sendChRefs wait group, signalling that this exchange no longer has
-// any active goroutines that will try to send to sendCh.
+// removeExchange方法先删除message exchange
+// 并使得message exchange set的goroutine数量减1，并触发移除事件
 func (mexset *messageExchangeSet) removeExchange(msgID uint32) {
 	if mexset.log.Enabled(LogLevelDebug) {
 		mexset.log.Debugf("Removing %s message exchange %d", mexset.name, msgID)
@@ -392,15 +402,12 @@ func (mexset *messageExchangeSet) removeExchange(msgID uint32) {
 		return
 	}
 
-	// If the message exchange was found, then we perform clean up actions.
-	// These clean up actions can only be run once per exchange.
+	// goroutines阻塞，waitgroup-1
 	mexset.sendChRefs.Done()
 	mexset.onRemoved()
 }
 
-// expireExchange is similar to removeExchange, however it does not decrement
-// the sendChRefs wait group, since there could still be a handler running that
-// will write to the send channel.
+// expireExchange方法, 删除message exchange，并从expired移除
 func (mexset *messageExchangeSet) expireExchange(msgID uint32) {
 	mexset.log.Debugf(
 		"Removing %s message exchange %d due to timeout, cancellation or blackhole",
@@ -424,11 +431,12 @@ func (mexset *messageExchangeSet) expireExchange(msgID uint32) {
 	mexset.onRemoved()
 }
 
-// waitForSendCh waits for all goroutines with references to sendCh to complete.
+// waitForSendCh等待所有的inbound与outbound的message exchanges全部移除
 func (mexset *messageExchangeSet) waitForSendCh() {
 	mexset.sendChRefs.Wait()
 }
 
+// 获取message exchange set的connection当前正在调用的msg id总数量
 func (mexset *messageExchangeSet) count() int {
 	mexset.RLock()
 	count := len(mexset.exchanges)
@@ -437,8 +445,7 @@ func (mexset *messageExchangeSet) count() int {
 	return count
 }
 
-// forwardPeerFrame forwards a frame from the peer to the appropriate message
-// exchange
+// forwardPeerFrame方法，通过获取到的frame和其中的msg id
 func (mexset *messageExchangeSet) forwardPeerFrame(frame *Frame) error {
 	if mexset.log.Enabled(LogLevelDebug) {
 		mexset.log.Debugf("forwarding %s %s", mexset.name, frame.Header)
@@ -457,6 +464,7 @@ func (mexset *messageExchangeSet) forwardPeerFrame(frame *Frame) error {
 		return nil
 	}
 
+	// 接收到的frame，发送到存储message exchange set的Peer正在阻塞等待rpc调用返回的响应
 	if err := mex.forwardPeerFrame(frame); err != nil {
 		mexset.log.WithFields(
 			LogField{"frameHeader", frame.Header.String()},
@@ -470,9 +478,9 @@ func (mexset *messageExchangeSet) forwardPeerFrame(frame *Frame) error {
 	return nil
 }
 
-// copyExchanges returns a copy of the exchanges if the exchange is active.
-// The caller must lock the mexset.
+// copyExchanges方法, 快照克隆message exchanges
 func (mexset *messageExchangeSet) copyExchanges() (shutdown bool, exchanges map[uint32]*messageExchange) {
+	// 校验message exchange set是否已关闭
 	if mexset.shutdown {
 		return true, nil
 	}
@@ -485,8 +493,7 @@ func (mexset *messageExchangeSet) copyExchanges() (shutdown bool, exchanges map[
 	return false, exchangesCopy
 }
 
-// stopExchanges stops all message exchanges to unblock all waiters on the mex.
-// This should only be called on connection failures.
+// stopExchanges方法，停止connection的direction中的message exchanges停止接收消息
 func (mexset *messageExchangeSet) stopExchanges(err error) {
 	if mexset.log.Enabled(LogLevelDebug) {
 		mexset.log.Debugf("stopping %v exchanges due to error: %v", mexset.count(), err)
@@ -503,12 +510,7 @@ func (mexset *messageExchangeSet) stopExchanges(err error) {
 	}
 
 	for _, mex := range exchanges {
-		// When there's a connection failure, we want to notify blocked callers that the
-		// call will fail, but we don't want to shutdown the exchange as only the
-		// arg reader/writer should shutdown the exchange. Otherwise, our guarantee
-		// on sendChRefs that there's no references to sendCh is violated since
-		// readers/writers could still have a reference to sendCh even though
-		// we shutdown the exchange and called Done on sendChRefs.
+		// 通知所有的message exchange停止接收消息
 		if mex.errChNotified.CAS(0, 1) {
 			mex.errCh.Notify(err)
 		}

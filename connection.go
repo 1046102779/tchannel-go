@@ -163,8 +163,8 @@ type Connection struct {
 	stopCh   chan struct{}       //  停止发送数据到net.conn上
 	state    connectionState     // connection的状态
 	stateMut sync.RWMutex        // 状态读写互斥
-	inbound  *messageExchangeSet // ::TODO
-	outbound *messageExchangeSet // ::TODO
+	inbound  *messageExchangeSet // 存储connection所在的Peer，调入并正在msg id消息传递的列表
+	outbound *messageExchangeSet // 存储connection所在的Peer，调出并正在msg id消息传递的列表
 	// 当每个连接接收到协议帧并获取业务逻辑数据后，
 	// 通过继承channel的handler通过反射，往上层放到业务逻辑处理业务
 	handler         Handler
@@ -319,9 +319,11 @@ func (ch *Channel) newConnection(conn net.Conn, initialID uint32, outboundHP str
 		remotePeerInfo: remotePeer,
 		// host:port相关，可以通过peerInfo解析获取
 		remotePeerAddress: remotePeerAddress,
-		outboundHP:        outboundHP,                                             // 流出
-		inbound:           newMessageExchangeSet(log, messageExchangeSetInbound),  // ::TODO
-		outbound:          newMessageExchangeSet(log, messageExchangeSetOutbound), // ::TODO
+		outboundHP:        outboundHP, // 流出
+		//  每个connection都有两个inbound和outbound，一个调入，一个调出
+		// message exchange set是一个方向的, 且正在数据流通的msg id
+		inbound:  newMessageExchangeSet(log, messageExchangeSetInbound),
+		outbound: newMessageExchangeSet(log, messageExchangeSetOutbound),
 		// 所有的rpc client的请求处理都是通过, 即通过channelHandler类型的Handler方法处理,
 		// 该channelHandler通过rpc client请求的serviceName，获取subchannel
 		// 并通过subchannel的Handle方法处理
@@ -352,7 +354,6 @@ func (ch *Channel) newConnection(conn net.Conn, initialID uint32, outboundHP str
 	c.inbound.onAdded = c.onExchangeAdded
 	c.outbound.onAdded = c.onExchangeAdded
 
-	// ::TODO
 	if ch.RelayHost() != nil {
 		c.relay = NewRelayer(ch, c)
 	}
@@ -427,7 +428,7 @@ func (c *Connection) ping(ctx context.Context) error {
 	}
 	defer c.pendingExchangeMethodDone()
 
-	// 拼装ping的协议帧包 ::TODO
+	// 拼装ping的协议帧包, 这个是ping req，并新建message exchange
 	req := &pingReq{id: c.NextMessageID()}
 	mex, err := c.outbound.newExchange(ctx, c.opts.FramePool, req.messageType(), req.ID(), 1)
 	if err != nil {
@@ -441,7 +442,7 @@ func (c *Connection) ping(ctx context.Context) error {
 		return c.connectionError("send ping", err)
 	}
 
-	// ::TODO
+	// 阻塞获取ping消息的响应, 这个是通过message exchange的select channel获取响应
 	return c.recvMessage(ctx, &pingRes{}, mex)
 }
 
@@ -457,7 +458,7 @@ Position	Contents
 // handlePingRes，是针对ping res包解析数据
 // connection接收对方发过来的ping响应包
 func (c *Connection) handlePingRes(frame *Frame) bool {
-	// ::TODO
+	// Peer接收到frame后，并把这个响应帧通过select channel发送给正在阻塞等待的响应rpc调用
 	if err := c.outbound.forwardPeerFrame(frame); err != nil {
 		c.log.WithFields(LogField{"response", frame.Header}).Warn("Unexpected ping response.")
 		return true
