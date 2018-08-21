@@ -734,8 +734,10 @@ func (c *Connection) handleFrameNoRelay(frame *Frame) bool {
 	// 另外的init req, init res, cancel, claim四种协议类型，目前没看到实现
 	switch frame.Header.messageType {
 	case messageTypeCallReq:
+		// connection接收call req frame
 		releaseFrame = c.handleCallReq(frame)
 	case messageTypeCallReqContinue:
+		// connection接收call req continue frame
 		releaseFrame = c.handleCallReqContinue(frame)
 	case messageTypeCallRes:
 		releaseFrame = c.handleCallRes(frame)

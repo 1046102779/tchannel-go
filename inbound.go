@@ -32,11 +32,10 @@ import (
 
 var errInboundRequestAlreadyActive = errors.New("inbound request is already active; possible duplicate client id")
 
-// handleCallReq handles an incoming call request, registering a message
-// exchange to receive further fragments for that call, and dispatching it in
-// another goroutine
+// handleCallReq处理接收到的call req frame
 func (c *Connection) handleCallReq(frame *Frame) bool {
 	now := c.timeNow()
+	// 校验当前connection的状态, 必须为active connection
 	switch state := c.readState(); state {
 	case connectionActive:
 		break
@@ -48,6 +47,7 @@ func (c *Connection) handleCallReq(frame *Frame) bool {
 	}
 
 	callReq := new(callReq)
+	// 获取call req的msg id, 并解析frame到initialFragment
 	callReq.id = frame.Header.ID
 	initialFragment, err := parseInboundFragment(c.opts.FramePool, frame, callReq)
 	if err != nil {
@@ -59,6 +59,11 @@ func (c *Connection) handleCallReq(frame *Frame) bool {
 		return true
 	}
 
+	// 这里的InboundCall：
+	// 1. 封装解析frame和response引用；
+	// 2. 通过frame的methodname找到handle，并通过反射，进行具体协议json/thrift等进行业务逻辑处理；
+	// 3. 把业务逻辑数据的返回写入到response中, 这样也就写入到了connection中
+	// 4. 发起的call req frame的Peer，正阻塞等待response返回
 	call := new(InboundCall)
 	call.conn = c
 	ctx, cancel := newIncomingContext(call, callReq.TimeToLive)
@@ -69,6 +74,7 @@ func (c *Connection) handleCallReq(frame *Frame) bool {
 	}
 	defer c.pendingExchangeMethodDone()
 
+	// 新建一个message exchange, 并通过msg id与message exchange建立map存储
 	mex, err := c.inbound.newExchange(ctx, c.opts.FramePool, callReq.messageType(), frame.Header.ID, mexChannelBufferSize)
 	if err != nil {
 		if err == errDuplicateMex {
@@ -128,13 +134,15 @@ func (c *Connection) handleCallReq(frame *Frame) bool {
 	response.commonStatsTags = call.commonStatsTags
 
 	setResponseHeaders(call.headers, response.headers)
+	// 这里需要启用一个goroutine吗？是的，需要
+	// 因为connection可以复用，并不是一个业务处理完成，才能复用这个connection，而是随时都可以
+	//
+	// 这里是分发业务处理
 	go c.dispatchInbound(c.connID, callReq.ID(), call, frame)
 	return false
 }
 
-// handleCallReqContinue handles the continuation of a call request, forwarding
-// it to the request channel for that request, where it can be pulled during
-// defragmentation
+// 因为call req已经发起请求了，后续的所有相同的msg id，都是后续处理，Peer-To-Peer都是两边阻塞着message exchange等待frame到来的处理
 func (c *Connection) handleCallReqContinue(frame *Frame) bool {
 	if err := c.inbound.forwardPeerFrame(frame); err != nil {
 		// If forward fails, it's due to a timeout. We can free this frame.
@@ -143,7 +151,7 @@ func (c *Connection) handleCallReqContinue(frame *Frame) bool {
 	return false
 }
 
-// createStatsTags creates the common stats tags, if they are not already created.
+// createStatsTags创建统计tags
 func (call *InboundCall) createStatsTags(connectionTags map[string]string) {
 	call.commonStatsTags = map[string]string{
 		"calling-service": call.CallerName(),
@@ -153,7 +161,7 @@ func (call *InboundCall) createStatsTags(connectionTags map[string]string) {
 	}
 }
 
-// dispatchInbound ispatches an inbound call to the appropriate handler
+// 这个用在call req frame的请求分发处理, 并通过具体协议指定的Handle方法，通过反射映射到注册的业务处理函数, 并把结果返回到connection中
 func (c *Connection) dispatchInbound(_ uint32, _ uint32, call *InboundCall, frame *Frame) {
 	if call.log.Enabled(LogLevelDebug) {
 		call.log.Debugf("Received incoming call for %s from %s", call.ServiceName(), c.remotePeerInfo)
@@ -197,14 +205,19 @@ func (c *Connection) dispatchInbound(_ uint32, _ uint32, call *InboundCall, fram
 		}
 	}()
 
+	// 这里就是设计到具体的协议json/thrift，例如: HandleFunc(ctx Context, inbound *InboundCall)
+	// 业务逻辑方法处理
 	c.handler.Handle(call.mex.ctx, call)
 }
 
-// An InboundCall is an incoming call from a peer
+// 接收一个frame，并通过InboundCall进行存储frame和response引用
+// 它作为具体协议业务处理函数的第二个参数
 type InboundCall struct {
 	reqResReader
 
-	conn            *Connection
+	// active connection
+	conn *Connection
+	// response引用，通过这个可以在上层协议json/thrift中，把业务返回值写入到response的connection中
 	response        *InboundCallResponse
 	serviceName     string
 	method          []byte
@@ -214,57 +227,57 @@ type InboundCall struct {
 	commonStatsTags map[string]string
 }
 
-// ServiceName returns the name of the service being called
+// ServiceName方法返回服务名称
 func (call *InboundCall) ServiceName() string {
 	return call.serviceName
 }
 
-// Method returns the method being called
+// 返回方法名称
 func (call *InboundCall) Method() []byte {
 	return call.method
 }
 
-// MethodString returns the method being called as a string.
+// 返回方法名称
 func (call *InboundCall) MethodString() string {
 	return call.methodString
 }
 
-// Format the format of the request from the ArgScheme transport header.
+// 在transport headers中，返回另一方Peer使用的具体协议: json, thrift, ...
 func (call *InboundCall) Format() Format {
 	return Format(call.headers[ArgScheme])
 }
 
-// CallerName returns the caller name from the CallerName transport header.
+// 在transport headers中，返回CallerName名称,也是服务名
 func (call *InboundCall) CallerName() string {
 	return call.headers[CallerName]
 }
 
-// ShardKey returns the shard key from the ShardKey transport header.
+// 在transport headers中，返回ShardKey
 func (call *InboundCall) ShardKey() string {
 	return call.headers[ShardKey]
 }
 
-// RoutingKey returns the routing key from the RoutingKey transport header.
+// 在transport headers中，返回RoutingKey
 func (call *InboundCall) RoutingKey() string {
 	return call.headers[RoutingKey]
 }
 
-// RoutingDelegate returns the routing delegate from the RoutingDelegate transport header.
+// 在transport headers中，返回RoutingDelegate
 func (call *InboundCall) RoutingDelegate() string {
 	return call.headers[RoutingDelegate]
 }
 
-// LocalPeer returns the local peer information for this call.
+// 返回InboundCall所在服务的PeerInfo。
 func (call *InboundCall) LocalPeer() LocalPeerInfo {
 	return call.conn.localPeerInfo
 }
 
-// RemotePeer returns the remote peer information for this call.
+// 返回InboundCall所在connection的另一边Peer信息
 func (call *InboundCall) RemotePeer() PeerInfo {
 	return call.conn.RemotePeerInfo()
 }
 
-// CallOptions returns a CallOptions struct suitable for forwarding a request.
+// 返回CallOptions, 主要是transport headers中的相关参数, 具体见tchannel协议规范
 func (call *InboundCall) CallOptions() *CallOptions {
 	return &CallOptions{
 		callerName:      call.CallerName(),
@@ -275,7 +288,7 @@ func (call *InboundCall) CallOptions() *CallOptions {
 	}
 }
 
-// Reads the entire method name (arg1) from the request stream.
+// 获取调用方法名称
 func (call *InboundCall) readMethod() error {
 	var arg1 []byte
 	if err := NewArgReader(call.arg1Reader()).Read(&arg1); err != nil {
@@ -287,20 +300,17 @@ func (call *InboundCall) readMethod() error {
 	return nil
 }
 
-// Arg2Reader returns an ArgReader to read the second argument.
-// The ReadCloser must be closed once the argument has been read.
+// Arg2Reader方法读取arg2参数, 到ArgReader实例中
 func (call *InboundCall) Arg2Reader() (ArgReader, error) {
 	return call.arg2Reader()
 }
 
-// Arg3Reader returns an ArgReader to read the last argument.
-// The ReadCloser must be closed once the argument has been read.
+// Arg3Reader读取arg3参数，到ArgReader实例中
 func (call *InboundCall) Arg3Reader() (ArgReader, error) {
 	return call.arg3Reader()
 }
 
-// Response provides access to the InboundCallResponse object which can be used
-// to write back to the calling peer
+// 返回InboundCall中的Response引用
 func (call *InboundCall) Response() *InboundCallResponse {
 	if call.err != nil {
 		// While reading Thrift, we cannot distinguish between malformed Thrift and other errors,
@@ -314,7 +324,7 @@ func (call *InboundCall) Response() *InboundCallResponse {
 
 func (call *InboundCall) doneReading(unexpected error) {}
 
-// An InboundCallResponse is used to send the response back to the calling peer
+// 当业务逻辑处理完后，InboundCallResponse会把业务数据结果写入到connection中
 type InboundCallResponse struct {
 	reqResWriter
 
@@ -368,8 +378,7 @@ func (response *InboundCallResponse) Blackhole() {
 	response.cancel()
 }
 
-// Arg2Writer returns a WriteCloser that can be used to write the second argument.
-// The returned writer must be closed once the write is complete.
+// 把arg2参数写入到Response的协议帧中
 func (response *InboundCallResponse) Arg2Writer() (ArgWriter, error) {
 	if err := NewArgWriter(response.arg1Writer()).Write(nil); err != nil {
 		return nil, err
@@ -377,14 +386,13 @@ func (response *InboundCallResponse) Arg2Writer() (ArgWriter, error) {
 	return response.arg2Writer()
 }
 
-// Arg3Writer returns a WriteCloser that can be used to write the last argument.
-// The returned writer must be closed once the write is complete.
+// 把arg3参数写入到Response的协议帧中
 func (response *InboundCallResponse) Arg3Writer() (ArgWriter, error) {
 	return response.arg3Writer()
 }
 
-// doneSending shuts down the message exchange for this call.
-// For incoming calls, the last message is sending the call response.
+// doneSending方法表示当一个msg id的调用全部完成后，也就是一个完整的调用流程。
+// 则关闭message exchange
 func (response *InboundCallResponse) doneSending() {
 	// TODO(prashant): Move this to when the message is actually being sent.
 	now := response.timeNow()
@@ -411,7 +419,7 @@ func (response *InboundCallResponse) doneSending() {
 	// Cancel the context since the response is complete.
 	response.cancel()
 
-	// The message exchange is still open if there are no errors, call shutdown.
+	// 关闭message exchange
 	if response.err == nil {
 		response.mex.shutdown()
 	}

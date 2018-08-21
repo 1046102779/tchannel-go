@@ -34,10 +34,12 @@ import (
 // maxMethodSize is the maximum size of arg1.
 const maxMethodSize = 16 * 1024
 
-// beginCall begins an outbound call on the connection
+// 存储connection所在的Peer发起一个outbound调用
+// beginCall方法， 封装协议帧的arg1参数
 func (c *Connection) beginCall(ctx context.Context, serviceName, methodName string, callOptions *CallOptions) (*OutboundCall, error) {
 	now := c.timeNow()
 
+	// 校验connection state是否为active
 	switch state := c.readState(); state {
 	case connectionActive:
 		break
@@ -54,8 +56,7 @@ func (c *Connection) beginCall(ctx context.Context, serviceName, methodName stri
 		return nil, ErrTimeoutRequired
 	}
 
-	// If the timeToLive is less than a millisecond, it will be encoded as 0 on
-	// the wire, hence we return a timeout immediately.
+	// 校验一次完整的rpc调用的context是否已经超时
 	timeToLive := deadline.Sub(now)
 	if timeToLive < time.Millisecond {
 		return nil, ErrTimeout
@@ -71,7 +72,9 @@ func (c *Connection) beginCall(ctx context.Context, serviceName, methodName stri
 	}
 	defer c.pendingExchangeMethodDone()
 
+	// 发起一个rpc调用，则需要新建msg id
 	requestID := c.NextMessageID()
+	// 新建一个message exchange, 并通过msg id与message exchange建立map
 	mex, err := c.outbound.newExchange(ctx, c.opts.FramePool, messageTypeCallReq, requestID, mexChannelBufferSize)
 	if err != nil {
 		return nil, err
@@ -83,6 +86,7 @@ func (c *Connection) beginCall(ctx context.Context, serviceName, methodName stri
 		return nil, ErrConnectionClosed
 	}
 
+	// Transport Header为协议帧的payload部分数据
 	headers := transportHeaders{
 		CallerName: c.localPeerInfo.ServiceName,
 	}
@@ -91,6 +95,8 @@ func (c *Connection) beginCall(ctx context.Context, serviceName, methodName stri
 		opts.overrideHeaders(headers)
 	}
 
+	// 新建一个发起OutboundCall的对外调用所需要的存储，包括call的调用协议帧和response引用
+	// response引用主要用于message exchange的阻塞等待另一边response的返回
 	call := new(OutboundCall)
 	call.mex = mex
 	call.conn = c
@@ -141,8 +147,7 @@ func (c *Connection) beginCall(ctx context.Context, serviceName, methodName stri
 	return call, nil
 }
 
-// handleCallRes handles an incoming call req message, forwarding the
-// frame to the response channel waiting for it
+// handleCallRes方法，因为call req已经发起了，所以直接找到message exchange的channel队列发送，因为connection正在阻塞等待response
 func (c *Connection) handleCallRes(frame *Frame) bool {
 	if err := c.outbound.forwardPeerFrame(frame); err != nil {
 		return true
@@ -150,8 +155,7 @@ func (c *Connection) handleCallRes(frame *Frame) bool {
 	return false
 }
 
-// handleCallResContinue handles an incoming call res continue message,
-// forwarding the frame to the response channel waiting for it
+// handleCallResContinue同上
 func (c *Connection) handleCallResContinue(frame *Frame) bool {
 	if err := c.outbound.forwardPeerFrame(frame); err != nil {
 		return true
@@ -159,10 +163,7 @@ func (c *Connection) handleCallResContinue(frame *Frame) bool {
 	return false
 }
 
-// An OutboundCall is an active call to a remote peer.  A client makes a call
-// by calling BeginCall on the Channel, writing argument content via
-// ArgWriter2() ArgWriter3(), and then reading reading response data via the
-// ArgReader2() and ArgReader3() methods on the Response() object.
+// OutboundCall存储outbound调用的相关信息, 并存储将要返回的response信息
 type OutboundCall struct {
 	reqResWriter
 
@@ -172,13 +173,12 @@ type OutboundCall struct {
 	commonStatsTags map[string]string
 }
 
-// Response provides access to the call's response object, which can be used to
-// read response arguments
+// Response方法返回发起outbound调用的对方Peer Response
 func (call *OutboundCall) Response() *OutboundCallResponse {
 	return call.response
 }
 
-// createStatsTags creates the common stats tags, if they are not already created.
+// createStatsTags创建tags
 func (call *OutboundCall) createStatsTags(connectionTags map[string]string, callOptions *CallOptions, method string) {
 	call.commonStatsTags = map[string]string{
 		"target-service": call.callReq.Service,
@@ -191,37 +191,35 @@ func (call *OutboundCall) createStatsTags(connectionTags map[string]string, call
 	}
 }
 
-// writeMethod writes the method (arg1) to the call
+// writeMethod方法写入method到arg1参数中
 func (call *OutboundCall) writeMethod(method []byte) error {
 	call.statsReporter.IncCounter("outbound.calls.send", call.commonStatsTags, 1)
 	return NewArgWriter(call.arg1Writer()).Write(method)
 }
 
-// Arg2Writer returns a WriteCloser that can be used to write the second argument.
-// The returned writer must be closed once the write is complete.
+// Arg2Writer方法写入arg2到协议帧中
 func (call *OutboundCall) Arg2Writer() (ArgWriter, error) {
 	return call.arg2Writer()
 }
 
-// Arg3Writer returns a WriteCloser that can be used to write the last argument.
-// The returned writer must be closed once the write is complete.
+// Arg3Writer方法写入arg3到协议帧中
 func (call *OutboundCall) Arg3Writer() (ArgWriter, error) {
 	return call.arg3Writer()
 }
 
-// LocalPeer returns the local peer information for this call.
+// LocalPeer方法返回存储OutboundCall所在的Peer信息
 func (call *OutboundCall) LocalPeer() LocalPeerInfo {
 	return call.conn.localPeerInfo
 }
 
-// RemotePeer returns the remote peer information for this call.
+// RemotePeer方法返回存储OutboundCall所在的另一边Peer信息
 func (call *OutboundCall) RemotePeer() PeerInfo {
 	return call.conn.RemotePeerInfo()
 }
 
 func (call *OutboundCall) doneSending() {}
 
-// An OutboundCallResponse is the response to an outbound call
+// OutboundCallResponse方法存储outbound调用，并阻塞等待对方Peer的response
 type OutboundCallResponse struct {
 	reqResReader
 
@@ -245,13 +243,12 @@ func (response *OutboundCallResponse) ApplicationError() bool {
 	return response.callRes.ResponseCode == responseApplicationError
 }
 
-// Format the format of the request from the ArgScheme transport header.
+// Format方法返回payload中的transport header中的the arg scheme： json/thrift
 func (response *OutboundCallResponse) Format() Format {
 	return Format(response.callRes.Headers[ArgScheme])
 }
 
-// Arg2Reader returns an ArgReader to read the second argument.
-// The ReadCloser must be closed once the argument has been read.
+// Arg2Reader方法获取arg2参数
 func (response *OutboundCallResponse) Arg2Reader() (ArgReader, error) {
 	var method []byte
 	if err := NewArgReader(response.arg1Reader()).Read(&method); err != nil {
@@ -261,8 +258,7 @@ func (response *OutboundCallResponse) Arg2Reader() (ArgReader, error) {
 	return response.arg2Reader()
 }
 
-// Arg3Reader returns an ArgReader to read the last argument.
-// The ReadCloser must be closed once the argument has been read.
+// Arg3Reader方法获取arg3参数
 func (response *OutboundCallResponse) Arg3Reader() (ArgReader, error) {
 	return response.arg3Reader()
 }
@@ -311,6 +307,7 @@ func (c *Connection) handleError(frame *Frame) bool {
 	return false
 }
 
+// 快照克隆tags, 很多地方不一致，有些直接使用的互斥，并作为某个struct的行为
 func cloneTags(tags map[string]string) map[string]string {
 	newTags := make(map[string]string, len(tags))
 	for k, v := range tags {
@@ -319,8 +316,7 @@ func cloneTags(tags map[string]string) map[string]string {
 	return newTags
 }
 
-// doneReading shuts down the message exchange for this call.
-// For outgoing calls, the last message is reading the call response.
+// doneReading方法，表示当存储OutboundCallResponse所在的Peer，发起rpc调用，并阻塞直到另一方Peer的Response后，这个msg id表示调用结束。则可以关闭这个message exchange
 func (response *OutboundCallResponse) doneReading(unexpected error) {
 	now := response.timeNow()
 
@@ -363,9 +359,11 @@ func (response *OutboundCallResponse) doneReading(unexpected error) {
 		response.statsReporter.IncCounter("outbound.calls.success", response.commonStatsTags, 1)
 	}
 
+	// 关闭message exchange
 	response.mex.shutdown()
 }
 
+// rpc调用时之前，校验service name，method name和transport headers参数
 func validateCall(ctx context.Context, serviceName, methodName string, callOpts *CallOptions) error {
 	if serviceName == "" {
 		return ErrNoServiceName

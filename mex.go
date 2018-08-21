@@ -31,6 +31,22 @@ import (
 	"golang.org/x/net/context"
 )
 
+// 这里系统的讲解下message exchange
+//
+// 当Peer-To-Peer中的一方发起outbound调用时，则就要监听另一方的Response返回，这样就需要使用message exchange阻塞接收frame
+// 例如：
+//   服务注册的服务channel，发起一个ping请求。如connection.go的388行
+//   ...
+/*
+	// 发送一个ping请求
+	if err := c.sendMessage(req); err !=nil {
+		return c.connectionError("send ping", err)
+	}
+
+	// 阻塞等待另一方的Peer Response, 这个recvMessage方法就是使用了message exchange的channel队列
+	return c.recvMessage(ctx, &pingRes{}, mex)
+*/
+
 var (
 	errDuplicateMex        = errors.New("multiple attempts to use the message id")
 	errMexShutdown         = errors.New("mex has been shutdown")
@@ -84,10 +100,8 @@ func (e *errNotifier) checkErr() error {
 	}
 }
 
-// A messageExchange tracks this Connections's side of a message exchange with a
-// peer.  Each message exchange has a channel that can be used to receive
-// frames from the peer, and a Context that can controls when the exchange has
-// timed out or been cancelled.
+// messageExchange用于跟踪connection的信息交换
+// 每个message exchange都有一个channel，它用于从Peer上接收frames
 type messageExchange struct {
 	recvCh    chan *Frame
 	errCh     errNotifier
@@ -111,8 +125,7 @@ func (mex *messageExchange) checkError() error {
 	return mex.errCh.checkErr()
 }
 
-// forwardPeerFrame forwards a frame from a peer to the message exchange, where
-// it can be pulled by whatever application thread is handling the exchange
+// forwardPeerFrame传递一个frame从一个peer到这个message exchange
 func (mex *messageExchange) forwardPeerFrame(frame *Frame) error {
 	// We want a very specific priority here:
 	// 1. Timeouts/cancellation (mex.ctx errors)
