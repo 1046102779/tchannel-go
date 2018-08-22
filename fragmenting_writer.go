@@ -38,9 +38,10 @@ const (
 	hasMoreFragmentsFlag = 0x01 // flags indicating there are more fragments coming
 )
 
-// A writableFragment is a fragment that can be written to, containing a buffer
-// for contents, a running checksum, and placeholders for the fragment flags
-// and final checksum value
+// frame.go， message.go与typed已经读写解析和封装了协议帧中header全部和payload部分内容
+//
+// writableFragment主要包括call req与call res协议帧中相关数据字段的读写
+// 包括：flags，csumtype, checksum与arg1, arg2与arg3参数的读写
 type writableFragment struct {
 	flagsRef    typed.ByteRef
 	checksumRef typed.BytesRef
@@ -49,9 +50,11 @@ type writableFragment struct {
 	frame       interface{}
 }
 
-// finish finishes the fragment, updating the final checksum and fragment flags
+// finish方法修改writableFragment的相关flag与checksum校验和
 func (f *writableFragment) finish(hasMoreFragments bool) {
+	// 更新协议帧的校验和
 	f.checksumRef.Update(f.checksum.Sum())
+	// 更新协议帧中的flag, 如果没有更多的分片，则直接释放掉checksum存储的协议帧
 	if hasMoreFragments {
 		f.flagsRef.Update(hasMoreFragmentsFlag)
 	} else {
@@ -59,8 +62,7 @@ func (f *writableFragment) finish(hasMoreFragments bool) {
 	}
 }
 
-// A writableChunk is a chunk of data within a fragment, representing the
-// contents of an argument within that fragment
+// writableChunk在分片的一个块数据，如分片中的arg1, arg2或者arg3三者之一
 type writableChunk struct {
 	size     uint16
 	sizeRef  typed.Uint16Ref
@@ -68,36 +70,43 @@ type writableChunk struct {
 	contents *typed.WriteBuffer
 }
 
-// newWritableChunk creates a new writable chunk around a checksum and a buffer to hold data
+// newWritableChunk方法创建writableChunk实例
 func newWritableChunk(checksum Checksum, contents *typed.WriteBuffer) *writableChunk {
 	return &writableChunk{
-		size:     0,
+		size: 0,
+		// 在WriteBuffer中的remaining首先写入2字节的参数总长度
+		// 所有的arg，都是2字节
 		sizeRef:  contents.DeferUint16(),
 		checksum: checksum,
 		contents: contents,
 	}
 }
 
-// writeAsFits writes as many bytes from the given slice as fits into the chunk
+// writeAsFits方法写入arg参数值b
 func (c *writableChunk) writeAsFits(b []byte) int {
+	// 如果WriteBuffer的remaining剩余空间不足的话，就需要截取arg参数值b的长度
 	if len(b) > c.contents.BytesRemaining() {
 		b = b[:c.contents.BytesRemaining()]
 	}
 
+	// 增加checksum要校验的内容
 	c.checksum.Add(b)
+	// arg参数值写入到WriteBuffer的remaining中
 	c.contents.WriteBytes(b)
 
+	// 统计已写入到WriteBuffer的总长度,
+	// 其实这个是可以使用WriteBuffer的BytesWritten方法获取的
 	written := len(b)
 	c.size += uint16(written)
 	return written
 }
 
-// finish finishes the chunk, updating its chunk size
+// finish方法更新已写入完成的arg参数总大小，到引用块中
 func (c *writableChunk) finish() {
 	c.sizeRef.Update(c.size)
 }
 
-// A fragmentSender allocates and sends outbound fragments to a target
+// fragmentSender interface，reqResWriter实现了它
 type fragmentSender interface {
 	// newFragment allocates a new fragment
 	newFragment(initial bool, checksum Checksum) (*writableFragment, error)
@@ -128,16 +137,20 @@ func (s fragmentingWriterState) isWritingArgument() bool {
 // checksum.  It relies on an underlying fragmentSender, which creates and
 // flushes the fragments as needed
 type fragmentingWriter struct {
-	logger      Logger
-	sender      fragmentSender
-	checksum    Checksum
+	logger   Logger
+	sender   fragmentSender
+	checksum Checksum
+	// 通过writableChunk写入一个arg，并同步到writableFragment中
+	// 直到arg1，arg2和arg3写入writableFragment中
 	curFragment *writableFragment
 	curChunk    *writableChunk
-	state       fragmentingWriterState
-	err         error
+	// 写入call req与call res中的payload部分的arg1，arg2和arg3的当前状态
+	state fragmentingWriterState
+	err   error
 }
 
-// newFragmentingWriter creates a new fragmenting writer
+// newFragmentingWriter方法创建fragmentingWriter实例, 状态为fragmentingWriteStart
+// 表示开始准备写入arg三个参数
 func newFragmentingWriter(logger Logger, sender fragmentSender, checksum Checksum) *fragmentingWriter {
 	return &fragmentingWriter{
 		logger:   logger,
@@ -147,17 +160,17 @@ func newFragmentingWriter(logger Logger, sender fragmentSender, checksum Checksu
 	}
 }
 
-// ArgWriter returns an ArgWriter to write an argument. The ArgWriter will handle
-// fragmentation as needed. Once the argument is written, the ArgWriter must be closed.
+// ArgWriter方法返回一个fragmentingWriter中属性初始化的writableChunk, 写入一个参数
 func (w *fragmentingWriter) ArgWriter(last bool) (ArgWriter, error) {
+	// 初始化writableChunk和state, 前者用于写入一个arg
 	if err := w.BeginArgument(last); err != nil {
 		return nil, err
 	}
 	return w, nil
 }
 
-// BeginArgument tells the writer that the caller is starting a new argument.
-// Must not be called while an existing argument is in place
+// BeginArgument方法开始获取写入一个arg参数的空闲内存空间writableChunk
+// 注意writableChunk是对writableFragment中的空闲内存引用，前部分是已写入的arg。
 func (w *fragmentingWriter) BeginArgument(last bool) error {
 	if w.err != nil {
 		return w.err
@@ -188,7 +201,12 @@ func (w *fragmentingWriter) BeginArgument(last bool) error {
 			w.curFragment.contents.BytesRemaining()))
 	}
 
+	// 把writableFragment的contents空间给了writableChunk, 后者用于写入新的arg。
+	// 也就是这样的
+	// writableFragment：| 已写入的arg | 待写入的arg(writableChunk) |
+	//
 	w.curChunk = newWritableChunk(w.checksum, w.curFragment.contents)
+	// last为true时，表示payload部分的arg1，arg2和arg3已写入完成
 	w.state = fragmentingWriteInArgument
 	if last {
 		w.state = fragmentingWriteInLastArgument
@@ -209,19 +227,22 @@ func (w *fragmentingWriter) Write(b []byte) (int, error) {
 
 	totalWritten := 0
 	for {
+		// 写入arg参数，如果writableChunk满了，则表示整个协议帧缓冲完成
+		// 剩余的则是新的协议帧数据
 		bytesWritten := w.curChunk.writeAsFits(b)
 		totalWritten += bytesWritten
+		// 如果相等，则表示还没写满，需要继续填充协议帧
 		if bytesWritten == len(b) {
 			// The whole thing fit, we're done
 			return totalWritten, nil
 		}
 
-		// There was more data than fit into the fragment, so flush the current fragment,
-		// start a new fragment and chunk, and continue writing
+		// 需要更多的数据填充这个协议帧
 		if w.err = w.Flush(); w.err != nil {
 			return totalWritten, w.err
 		}
 
+		// 写入了bytesWritten个字节，则继续剩余数据继续写入协议帧
 		b = b[bytesWritten:]
 	}
 }

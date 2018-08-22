@@ -46,7 +46,8 @@ func (e errReqResReaderStateMismatch) Error() string {
 		e.state, e.expectedState)
 }
 
-// reqResWriterState defines the state of a request/response writer
+// reqResWriterState定义了call req与call res中的arg1，arg2和arg3参数
+// 也就是说当读取/写入arg1后，再次就是arg2，最后为arg3
 type reqResWriterState int
 
 const (
@@ -58,13 +59,13 @@ const (
 
 //go:generate stringer -type=reqResWriterState
 
-// messageForFragment determines which message should be used for the given
-// fragment
+// 该函数类型用于校验是否有更多的fragment
 type messageForFragment func(initial bool) message
 
-// A reqResWriter writes out requests/responses.  Exactly which it does is
-// determined by its messageForFragment function which returns the appropriate
-// message to use when building an initial or follow-on fragment.
+// 通过frame.go与message.go，我们可以读写解析协议帧的header与payload部分数据
+// 但是call req, call res的arg1， arg2与arg3参数没有解析到
+//
+// 这个就留给了reqResWriter方法解析读取这些参数
 type reqResWriter struct {
 	conn               *Connection
 	contents           *fragmentingWriter
