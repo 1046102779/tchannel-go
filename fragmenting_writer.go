@@ -38,6 +38,8 @@ const (
 	hasMoreFragmentsFlag = 0x01 // flags indicating there are more fragments coming
 )
 
+// writableFragment用于读取connection数据流，并形成一个个帧，发送到网络中
+
 // frame.go， message.go与typed已经读写解析和封装了协议帧中header全部和payload部分内容
 //
 // writableFragment主要包括call req与call res协议帧中相关数据字段的读写
@@ -247,24 +249,31 @@ func (w *fragmentingWriter) Write(b []byte) (int, error) {
 	}
 }
 
-// Flush flushes the current fragment, and starts a new fragment and chunk.
+// Flush方法表示协议帧的部分片段已填充完成，需要继续提供空间继续写入到writableFragment中
 func (w *fragmentingWriter) Flush() error {
+	// 一个arg参数写入完成
 	w.curChunk.finish()
+	// 更多的分片需要继续写入
 	w.curFragment.finish(true)
+	// sender为reqResWriter实例, 实现了fragmentSender interface
+	// 发送分片到阻塞等待的rpc调用响应的数据
 	if w.err = w.sender.flushFragment(w.curFragment); w.err != nil {
 		return w.err
 	}
 
+	// 创建一个Fragment实例引用，Write方法继续处理其他分片到来的写入
 	if w.curFragment, w.err = w.sender.newFragment(false, w.checksum); w.err != nil {
 		return w.err
 	}
 
+	// 初始化writableChunk初始化为writableFragments的部分空闲空间引用
 	w.curChunk = newWritableChunk(w.checksum, w.curFragment.contents)
 	return nil
 }
 
 // Close ends the current argument.
 func (w *fragmentingWriter) Close() error {
+	// 校验call req与call res协议帧的payload部分中的arg三个参数已经填充完成
 	last := w.state == fragmentingWriteInLastArgument
 	if w.err != nil {
 		return w.err
@@ -285,6 +294,7 @@ func (w *fragmentingWriter) Close() error {
 	//      the current argument is complete
 	// 3. There are more arguments, and we can fit more data into this fragment
 	//      update the chunk but leave the current fragment open
+	// 写入完成
 	if last {
 		// No more arguments - flush this final fragment and mark ourselves complete
 		w.state = fragmentingWriteComplete
