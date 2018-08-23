@@ -78,6 +78,7 @@ type reqResWriter struct {
 
 //go:generate stringer -type=reqResReaderState
 
+// 获取写入到协议帧的arg1、arg2和arg3, 获取一个完整协议帧还未填充arg参数完毕的空闲内存引用
 func (w *reqResWriter) argWriter(last bool, inState reqResWriterState, outState reqResWriterState) (ArgWriter, error) {
 	if w.err != nil {
 		return nil, w.err
@@ -96,19 +97,24 @@ func (w *reqResWriter) argWriter(last bool, inState reqResWriterState, outState 
 	return argWriter, nil
 }
 
+// 获取arg1参数的空闲内存引用
 func (w *reqResWriter) arg1Writer() (ArgWriter, error) {
 	return w.argWriter(false /* last */, reqResWriterPreArg1, reqResWriterPreArg2)
 }
 
+// 获取arg2参数的空闲内存引用
 func (w *reqResWriter) arg2Writer() (ArgWriter, error) {
 	return w.argWriter(false /* last */, reqResWriterPreArg2, reqResWriterPreArg3)
 }
 
+// 获取arg3参数的空闲内存引用
 func (w *reqResWriter) arg3Writer() (ArgWriter, error) {
 	return w.argWriter(true /* last */, reqResWriterPreArg3, reqResWriterComplete)
 }
 
-// newFragment creates a new fragment for marshaling into
+// newFragment方法创建一个writableFragment实例，用于写入一个完整的协议帧
+// 通过newFragment方法可以知道，writableFragment是对frame各个数据的内存空间引用
+// 协议帧分为三部分数据： header、payload前半部分(message)和payload后半部分(arg1~arg3)
 func (w *reqResWriter) newFragment(initial bool, checksum Checksum) (*writableFragment, error) {
 	if err := w.mex.checkError(); err != nil {
 		return nil, w.failed(err)
@@ -116,19 +122,24 @@ func (w *reqResWriter) newFragment(initial bool, checksum Checksum) (*writableFr
 
 	message := w.messageForFragment(initial)
 
-	// Create the frame
+	// 创建一个frame
 	frame := w.conn.opts.FramePool.Get()
+	// 获取到message exchange建立的msg id发起的rpc调用
+	// 填充msg id和message type到header
 	frame.Header.ID = w.mex.msgID
 	frame.Header.messageType = message.messageType()
 
-	// Write the message into the fragment, reserving flags and checksum bytes
+	// WriteBuffer用于写入payload数据
 	wbuf := typed.NewWriteBuffer(frame.Payload[:])
+	// 获取payload部分的flag 1字节空闲内存引用
 	fragment := new(writableFragment)
 	fragment.frame = frame
 	fragment.flagsRef = wbuf.DeferByte()
+	// 用于读写payload数据前半部分到wbuf中, 直到transport headers写入完成
 	if err := message.write(wbuf); err != nil {
 		return nil, err
 	}
+	// 再就是checksumtype，checksum和arg1，arg2和arg3
 	wbuf.WriteSingleByte(byte(checksum.TypeCode()))
 	fragment.checksumRef = wbuf.DeferBytes(checksum.Size())
 	fragment.checksum = checksum
@@ -136,7 +147,7 @@ func (w *reqResWriter) newFragment(initial bool, checksum Checksum) (*writableFr
 	return fragment, wbuf.Err()
 }
 
-// flushFragment sends a fragment to the peer over the connection
+// flushFragment方法，当writableFragment写入一个完整的frame后，最终通过channel队列发送frame到connection上, 至此，rpc响应请求帧则发送回去了
 func (w *reqResWriter) flushFragment(fragment *writableFragment) error {
 	if w.err != nil {
 		return w.err
@@ -180,7 +191,7 @@ const (
 	reqResReaderComplete
 )
 
-// A reqResReader is capable of reading arguments from a request or response object.
+// reqResReader与reqResWriter类似，这个是用来读取数据到协议帧中
 type reqResReader struct {
 	contents           *fragmentingReader
 	mex                *messageExchange
@@ -192,28 +203,28 @@ type reqResReader struct {
 	err                error
 }
 
-// arg1Reader returns an ArgReader to read arg1.
+// arg1Reader方法读取arg1，并把数据存储到ArgReader中
 func (r *reqResReader) arg1Reader() (ArgReader, error) {
 	return r.argReader(false /* last */, reqResReaderPreArg1, reqResReaderPreArg2)
 }
 
-// arg2Reader returns an ArgReader to read arg2.
+// arg2Reader方法读取arg2，并把数据存储到ArgReader中
 func (r *reqResReader) arg2Reader() (ArgReader, error) {
 	return r.argReader(false /* last */, reqResReaderPreArg2, reqResReaderPreArg3)
 }
 
-// arg3Reader returns an ArgReader to read arg3.
+// arg3Reader方法读取arg3，并把数据存储到ArgReader中
 func (r *reqResReader) arg3Reader() (ArgReader, error) {
 	return r.argReader(true /* last */, reqResReaderPreArg3, reqResReaderComplete)
 }
 
-// argReader returns an ArgReader that can be used to read an argument. The
-// ReadCloser must be closed once the argument has been read.
+// argReader方法获取arg参数，并修改当前读取网络数据arg的状态: arg1, arg2, arg3
 func (r *reqResReader) argReader(last bool, inState reqResReaderState, outState reqResReaderState) (ArgReader, error) {
 	if r.state != inState {
 		return nil, r.failed(errReqResReaderStateMismatch{state: r.state, expectedState: inState})
 	}
 
+	// rpc调用并的阻塞等待对方Peer的响应，如：handleCallRes方法从connection上获取到frame后，并通过forwardPeerFrame方法把frame发送到一直在阻塞等待的message exchange中, 最后读取数据到argReader中
 	argReader, err := r.contents.ArgReader(last)
 	if err != nil {
 		return nil, r.failed(err)
@@ -223,7 +234,7 @@ func (r *reqResReader) argReader(last bool, inState reqResReaderState, outState 
 	return argReader, nil
 }
 
-// recvNextFragment receives the next fragment from the underlying message exchange.
+// recvNextFragment方法阻塞读取frame，并存储在readableFragment，它包括协议帧的header、payload前半部分(message)、payload后半部分(checksumType, checksum, arg1~arg3)
 func (r *reqResReader) recvNextFragment(initial bool) (*readableFragment, error) {
 	if r.initialFragment != nil {
 		fragment := r.initialFragment
@@ -232,8 +243,9 @@ func (r *reqResReader) recvNextFragment(initial bool) (*readableFragment, error)
 		return fragment, nil
 	}
 
-	// Wait for the appropriate message from the peer
+	// rpc调用并阻塞等待对方Peer的响应，最后通过message exchange发送接收到的frame给channel队列
 	message := r.messageForFragment(initial)
+	// 获取到的frame
 	frame, err := r.mex.recvPeerFrameOfType(message.messageType())
 	if err != nil {
 		if err, ok := err.(errorMessage); ok {
@@ -246,18 +258,18 @@ func (r *reqResReader) recvNextFragment(initial bool) (*readableFragment, error)
 		return nil, r.failed(err)
 	}
 
-	// Parse the message and setup the fragment
+	// 解析这个协议帧frame，并拆分成三部分存储到readableFragment=header+payload前部分+payload后部分
 	fragment, err := parseInboundFragment(r.mex.framePool, frame, message)
 	if err != nil {
 		return nil, r.failed(err)
 	}
 
+	// 存储当前正在处理的previousFragment
 	r.previousFragment = fragment
 	return fragment, nil
 }
 
-// releasePreviousFrament releases the last fragment returned by the reader if
-// it's still around. This operation is idempotent.
+// releasePreviousFrament方法释放当前的readableFragment
 func (r *reqResReader) releasePreviousFragment() {
 	fragment := r.previousFragment
 	r.previousFragment = nil
@@ -278,15 +290,19 @@ func (r *reqResReader) failed(err error) error {
 	return r.err
 }
 
-// parseInboundFragment parses an incoming fragment based on the given message
+// parseInboundFragment解析协议帧frame，到readableFragment
 func parseInboundFragment(framePool FramePool, frame *Frame, message message) (*readableFragment, error) {
+	// 获取ReadBuffer实例，存储payload数据
 	rbuf := typed.NewReadBuffer(frame.SizedPayload())
 	fragment := new(readableFragment)
+	// 先读取payload 1字节的flag
 	fragment.flags = rbuf.ReadSingleByte()
+	// 在读取payload前半部分，包括service name，transport headers
 	if err := message.read(rbuf); err != nil {
 		return nil, err
 	}
 
+	// 在最后读取payload后半部分，包括checksumType，checksum和arg1，arg2和arg3
 	fragment.checksumType = ChecksumType(rbuf.ReadSingleByte())
 	fragment.checksum = rbuf.ReadBytes(fragment.checksumType.ChecksumSize())
 	fragment.contents = rbuf
