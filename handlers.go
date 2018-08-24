@@ -28,16 +28,14 @@ import (
 	"golang.org/x/net/context"
 )
 
-// A Handler is an object that can be registered with a Channel to process
-// incoming calls for a given service and method
+// Handler interface用于tchannel的rpc服务端底层统一接收，
+// 再通过上层的具体协议json/thrift/http/raw等进行反射到具体的业务逻辑处理方法
 type Handler interface {
 	// Handles an incoming call for service
 	Handle(ctx context.Context, call *InboundCall)
 }
 
-// A HandlerFunc is an adapter to allow the use of ordinary functions as
-// Channel handlers.  If f is a function with the appropriate signature, then
-// HandlerFunc(f) is a Handler object that calls f.
+//  HandlerFunc函数类型类似于HTTP的func(ResponseWriter, *Request)
 type HandlerFunc func(ctx context.Context, call *InboundCall)
 
 // Handle calls f(ctx, call)
@@ -70,14 +68,21 @@ func (f ErrorHandlerFunc) getLogFields() LogFields {
 	}
 }
 
-// Manages handlers
+// 在subchannel.go中已经说明了subchannel中存储service name对外提供的所有服务方法列表
 type handlerMap struct {
 	sync.RWMutex
 
 	handlers map[string]Handler
 }
 
-// Registers a handler
+// Registers方法注册subchannel中service name对外提供的服务方法
+//
+// 注意大家可能有疑问的一点:
+// Handler func(context.Context, *InboundCall)
+// 但是理论上Handler应该是rpc服务端的方法列表中的一个，与具体的业务逻辑相关的，肯定不是上面这个参数形式
+// 这是因为在上层具体的协议中，如：json，会把注册的方法进行封装成这种形式：tchannel.HandlerFunc
+//
+// 具体见: json/handler.go 第96行
 func (hmap *handlerMap) register(h Handler, method string) {
 	hmap.Lock()
 	defer hmap.Unlock()
@@ -89,8 +94,7 @@ func (hmap *handlerMap) register(h Handler, method string) {
 	hmap.handlers[method] = h
 }
 
-// Finds the handler matching the given service and method.  See https://github.com/golang/go/issues/3512
-// for the reason that method is []byte instead of a string
+// Finds方法通过method方法名找到对应的业务处理函数
 func (hmap *handlerMap) find(method []byte) Handler {
 	hmap.RLock()
 	handler := hmap.handlers[string(method)]
@@ -99,8 +103,10 @@ func (hmap *handlerMap) find(method []byte) Handler {
 	return handler
 }
 
+// 当一个peer rpc service接收到rpc client的请求后，并通过subchannel的handleMap和method找到对应的上层协议封装的handle，最后通过反射到业务逻辑处理函数
 func (hmap *handlerMap) Handle(ctx context.Context, call *InboundCall) {
 	c := call.conn
+	// 找到handle
 	h := hmap.find(call.Method())
 	if h == nil {
 		c.log.WithFields(
@@ -115,11 +121,11 @@ func (hmap *handlerMap) Handle(ctx context.Context, call *InboundCall) {
 	if c.log.Enabled(LogLevelDebug) {
 		c.log.Debugf("Dispatching %s:%s from %s", call.ServiceName(), call.Method(), c.remotePeerInfo)
 	}
+	// 交给上层具体协议进行解析和业务逻辑处理
 	h.Handle(ctx, call)
 }
 
-// channelHandler is a Handler that wraps a Channel and delegates requests
-// to SubChannels based on the inbound call's service name.
+// channelHandler的Handle，我们可以发现最终channel的处理最终还是交给subchannel处理的
 type channelHandler struct{ ch *Channel }
 
 func (c channelHandler) Handle(ctx context.Context, call *InboundCall) {
