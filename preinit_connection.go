@@ -32,17 +32,30 @@ import (
 	"golang.org/x/net/context"
 )
 
+// 看文件名preinit_connection，就明白文件内的内容主要用于connection的建立，包括init req与init res
+// init req 与 init res的payload数据
+// version:2 nh:2 (key~2 value~2){nh}
+
 func (ch *Channel) outboundHandshake(ctx context.Context, c net.Conn, outboundHP string, events connectionEvents) (_ *Connection, err error) {
 	defer setInitDeadline(ctx, c)()
 	defer func() {
 		err = ch.initError(c, outbound, 1, err)
 	}()
 
+	// 这个在message.go中已经对所有协议帧类型进行了payload前半部分读写数据操作
 	msg := &initReq{initMessage: ch.getInitMessage(ctx, 1)}
+	// 通过writeMessage方法，封装了init req协议帧，并最后通过WriteOut发送到网络net.Conn中
 	if err := ch.writeMessage(c, msg); err != nil {
 		return nil, err
 	}
 
+	// 这里阻塞读取init res响应
+	// 主要通过connection的go conn.recvMessage接收到frame后
+	// 如果已经存在的msg id，则通过message exchange的forwardPeerFrame方法把frame发送到channel队列中
+	// 然后通过select channel阻塞的channel队列就获取到了frame
+	//
+	// 注意：这里并不是通过上面的这种方式实现的，而是直接读取net.Conn的数据，其实这是有风险的
+	// 快要被丢弃了
 	res := &initRes{}
 	id, err := ch.readMessage(c, res)
 	if err != nil {
@@ -62,10 +75,14 @@ func (ch *Channel) outboundHandshake(ctx context.Context, c net.Conn, outboundHP
 		return nil, NewWrappedSystemError(ErrCodeProtocol, err)
 	}
 
+	// 创建connection，并开始2个goroutine，用于发送和接收frame
+	// 并存储connection到Peer中
 	return ch.newConnection(c, 1 /* initialID */, outboundHP, remotePeer, remotePeerAddress, events), nil
 }
 
 // 当rpc service端获取到一个rpc client的请求Accept后，就开始解析协议帧，并分发处理
+//
+// inboundHandshake方法用于接收call res消息,
 func (ch *Channel) inboundHandshake(ctx context.Context, c net.Conn, events connectionEvents) (_ *Connection, err error) {
 	id := uint32(math.MaxUint32)
 
@@ -157,6 +174,8 @@ func (ch *Channel) initError(c net.Conn, connDir connectionDirection, id uint32,
 	return err
 }
 
+// 通过writeMessage方法，把init req或者init res消息写入到net.Conn
+// 先是封装frame，然后再发送到net.Conn
 func (ch *Channel) writeMessage(c net.Conn, msg message) error {
 	frame := ch.connectionOptions.FramePool.Get()
 	defer ch.connectionOptions.FramePool.Release(frame)
@@ -167,6 +186,7 @@ func (ch *Channel) writeMessage(c net.Conn, msg message) error {
 	return frame.WriteOut(c)
 }
 
+// 直接从net.Conn上阻塞读取init req或者init res消息
 func (ch *Channel) readMessage(c net.Conn, msg message) (uint32, error) {
 	frame := ch.connectionOptions.FramePool.Get()
 	defer ch.connectionOptions.FramePool.Release(frame)

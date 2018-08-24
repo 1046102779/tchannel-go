@@ -188,11 +188,11 @@ func (f *Frame) WriteOut(w io.Writer) error {
 	// 把Frame的HeaderFrame数据写入到headerBuffer中, 也就是写入到的buffer的前半部分
 	// 则也就是buffer完整的协议帧
 	//
-	// 我怀疑这里，不用把Frame的FrameHeader写入到buffer
-	// 因为可能Frame的headerBuffer已经存储了header
+	// 不用把Frame的FrameHeader写入到buffer
+	// 因为Frame的headerBuffer已经存储了header
 	wbuf := typed.NewWriteBuffer(f.headerBuffer)
 
-	if err := f.Header.write(&wbuf); err != nil {
+	if err := f.Header.write(wbuf); err != nil {
 		return err
 	}
 
@@ -202,6 +202,15 @@ func (f *Frame) WriteOut(w io.Writer) error {
 	}
 
 	return nil
+}
+
+func (f *Frame) ReadIn(r io.Reader) error {
+	header := make([]byte, FrameHeaderSize)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return err
+	}
+
+	return f.ReadBody(header, r)
 }
 
 // SizedPayload方法返回payload数据,或者内存引用
