@@ -224,7 +224,7 @@ func (r *reqResReader) argReader(last bool, inState reqResReaderState, outState 
 		return nil, r.failed(errReqResReaderStateMismatch{state: r.state, expectedState: inState})
 	}
 
-	// rpc调用并的阻塞等待对方Peer的响应，如：handleCallRes方法从connection上获取到frame后，并通过forwardPeerFrame方法把frame发送到一直在阻塞等待的message exchange中, 最后读取数据到argReader中
+	// rpc调用并阻塞等待对方Peer的响应，如：handleCallRes方法从connection上获取到frame后，并通过forwardPeerFrame方法把frame发送到一直在阻塞等待的message exchange中, 最后读取数据到argReader中
 	argReader, err := r.contents.ArgReader(last)
 	if err != nil {
 		return nil, r.failed(err)
