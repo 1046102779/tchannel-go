@@ -31,7 +31,7 @@ import (
 	"github.com/1046102779/tchannel-go/hyperbahn"
 	"github.com/1046102779/tchannel-go/raw"
 
-	"golang.org/x/net/context"
+	"context"
 )
 
 func main() {
