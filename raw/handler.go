@@ -52,12 +52,13 @@ type Res struct {
 	Arg3  []byte
 }
 
-// ReadArgs reads the *Args from the given call.
+// ReadArgs方法获取frame中的相关信息
 func ReadArgs(call *tchannel.InboundCall) (*Args, error) {
 	var args Args
 	args.Caller = call.CallerName()
 	args.Format = call.Format()
 	args.Method = string(call.Method())
+	// 获取arg2，arg3
 	if err := tchannel.NewArgReader(call.Arg2Reader()).Read(&args.Arg2); err != nil {
 		return nil, err
 	}
@@ -67,7 +68,7 @@ func ReadArgs(call *tchannel.InboundCall) (*Args, error) {
 	return &args, nil
 }
 
-// WriteResponse writes the given Res to the InboundCallResponse.
+// WriteResponse把业务返回数据，发送给InboundCallResponse的frame, 用于rpc调用的响应返回
 func WriteResponse(response *tchannel.InboundCallResponse, resp *Res) error {
 	if resp.SystemErr != nil {
 		return response.SendSystemError(resp.SystemErr)
@@ -77,6 +78,7 @@ func WriteResponse(response *tchannel.InboundCallResponse, resp *Res) error {
 			return err
 		}
 	}
+	// 把resp返回数据arg2和arg3写入到InboundCallResponse
 	if err := tchannel.NewArgWriter(response.Arg2Writer()).Write(resp.Arg2); err != nil {
 		return err
 	}
@@ -86,6 +88,7 @@ func WriteResponse(response *tchannel.InboundCallResponse, resp *Res) error {
 // Wrap wraps a Handler as a tchannel.Handler that can be passed to tchannel.Register.
 func Wrap(handler Handler) tchannel.Handler {
 	return tchannel.HandlerFunc(func(ctx context.Context, call *tchannel.InboundCall) {
+		// 这里就是包括的rpc调用的响应, 业务逻辑处理和返回
 		args, err := ReadArgs(call)
 		if err != nil {
 			handler.OnError(ctx, err)
