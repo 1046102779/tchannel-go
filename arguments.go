@@ -29,12 +29,10 @@ import (
 	"github.com/1046102779/tchannel-go/internal/argreader"
 )
 
-// ArgReader is the interface for the arg2 and arg3 streams on an
-// OutboundCallResponse and an InboundCall
+// ArgReader在OutboundCallResponse与InboundCall读取arg2和arg3
 type ArgReader io.ReadCloser
 
-// ArgWriter is the interface for the arg2 and arg3 streams on an OutboundCall
-// and an InboundCallResponse
+// ArgWriter在OutboundCall与InboundCallResponse上写入arg2和arg3
 type ArgWriter interface {
 	io.WriteCloser
 
@@ -43,32 +41,33 @@ type ArgWriter interface {
 	Flush() error
 }
 
-// ArgWritable is an interface for providing arg2 and arg3 writer streams;
-// implemented by reqResWriter e.g. OutboundCall and InboundCallResponse
+// ArgWritable interface获取arg2与arg3的frame相应位置的空闲内存引用
+// reqResWriter e.g. OutboundCall and InboundCallResponse
 type ArgWritable interface {
 	Arg2Writer() (ArgWriter, error)
 	Arg3Writer() (ArgWriter, error)
 }
 
-// ArgReadable is an interface for providing arg2 and arg3 reader streams;
-// implemented by reqResReader e.g. InboundCall and OutboundCallResponse.
+// ArgReadable interface获取arg2和arg3的数据流，并读取传入的内存空间
+//  reqResReader e.g. InboundCall and OutboundCallResponse.
 type ArgReadable interface {
 	Arg2Reader() (ArgReader, error)
 	Arg3Reader() (ArgReader, error)
 }
 
-// ArgReadHelper providers a simpler interface to reading arguments.
+// ArgReadHelper是一个读取arg参数的简单接口
 type ArgReadHelper struct {
 	reader ArgReader
 	err    error
 }
 
-// NewArgReader wraps the result of calling ArgXReader to provide a simpler
+// NewArgReader方法创建一个ArgReadHelper实例，ArgReader存放Frame存储arg的内存空间bytes流
 // interface for reading arguments.
 func NewArgReader(reader ArgReader, err error) ArgReadHelper {
 	return ArgReadHelper{reader, err}
 }
 
+// 传入ArgReaderHelper的闭包函数值, 用于下面的Read方法
 func (r ArgReadHelper) read(f func() error) error {
 	if r.err != nil {
 		return r.err
@@ -82,16 +81,17 @@ func (r ArgReadHelper) read(f func() error) error {
 	return r.reader.Close()
 }
 
-// Read reads from the reader into the byte slice.
+// Read方法读取ArgReaderHelper中的Frame指定位置的arg参数到传入参数的内存空间
 func (r ArgReadHelper) Read(bs *[]byte) error {
 	return r.read(func() error {
 		var err error
+		// 读取协议帧的arg到bs中
 		*bs, err = ioutil.ReadAll(r.reader)
 		return err
 	})
 }
 
-// ReadJSON deserializes JSON from the underlying reader into data.
+// ReadJSON方法以json协议格式把frame中的arg参数解析存储到data中
 func (r ArgReadHelper) ReadJSON(data interface{}) error {
 	return r.read(func() error {
 		// TChannel allows for 0 length values (not valid JSON), so we use a bufio.Reader
@@ -109,18 +109,18 @@ func (r ArgReadHelper) ReadJSON(data interface{}) error {
 	})
 }
 
-// ArgWriteHelper providers a simpler interface to writing arguments.
+// ArgWriteHelper用于把获取到的frame写入到io.WriterCloser中
 type ArgWriteHelper struct {
 	writer io.WriteCloser
 	err    error
 }
 
-// NewArgWriter wraps the result of calling ArgXWriter to provider a simpler
-// interface for writing arguments.
+// NewArgWriter方法创建一个ArgWriteHelper实例, 并把rpc请求数据处理后并封装到Frame, 并写入到io.WriterCloser
 func NewArgWriter(writer io.WriteCloser, err error) ArgWriteHelper {
 	return ArgWriteHelper{writer, err}
 }
 
+// write方法闭包函数，用于下面使用
 func (w ArgWriteHelper) write(f func() error) error {
 	if w.err != nil {
 		return w.err
@@ -133,7 +133,7 @@ func (w ArgWriteHelper) write(f func() error) error {
 	return w.writer.Close()
 }
 
-// Write writes the given bytes to the underlying writer.
+// Write方法写入bs []byte流到ArgWriteHelper的io.WriterCloser中
 func (w ArgWriteHelper) Write(bs []byte) error {
 	return w.write(func() error {
 		_, err := w.writer.Write(bs)
@@ -141,7 +141,7 @@ func (w ArgWriteHelper) Write(bs []byte) error {
 	})
 }
 
-// WriteJSON writes the given object as JSON.
+// WriteJSON方法把data数据已json协议写入到io.WriteCloser
 func (w ArgWriteHelper) WriteJSON(data interface{}) error {
 	return w.write(func() error {
 		e := json.NewEncoder(w.writer)
